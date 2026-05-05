@@ -3,19 +3,24 @@ App layout — builds and returns the full Dash component tree.
 Call build_layout() after the app is created.
 """
 
+import dash_leaflet as dl
 from dash import dcc, html, dash_table
 
 from config import (
     DATA_PATH, DEFAULT_KPI, DEFAULT_KPI_2, DEFAULT_KPI_3,
     DEFAULT_X, DEFAULT_Y, DEFAULT_COLOR,
     P0_COLOR, P1_COLOR,
+    SECTOR_ZOOM_THRESHOLD,
     SECTION_STYLE, APP_STYLE, TABLE_PAGE_SIZE,
+    _PILL_BTN, _PRIMARY_BTN,
 )
 from data_utils import categorical_options
 from precompute import (
     DF, LOAD_ERROR,
-    NUMERIC_COLS, KPI_OPTIONS, DATE_MIN, DATE_MAX,
+    NUMERIC_COLS, KPI_OPTIONS, DATE_MIN, DATE_MAX, DATE_SECOND,
+    SITE_SUMMARY,
 )
+from map_builder import SITE_POINT_TO_LAYER, SECTOR_STYLE
 
 
 def build_layout():
@@ -28,8 +33,7 @@ def build_layout():
         html.Div(
             LOAD_ERROR if LOAD_ERROR else f"Loaded {len(DF):,} rows from {DATA_PATH}",
             style={
-                "marginBottom": "16px",
-                "padding": "12px 14px",
+                "marginBottom": "16px", "padding": "12px 14px",
                 "borderRadius": "12px",
                 "background": "#fee2e2" if LOAD_ERROR else "#e0f2fe",
                 "color": "#111827",
@@ -37,7 +41,7 @@ def build_layout():
             },
         ),
 
-        # ---- Top filter row ----
+        # ── Top filter row ─────────────────────────────────────────────────
         html.Div([
             html.Div([
                 html.Label("Region"),
@@ -68,8 +72,11 @@ def build_layout():
                 html.Label("Date Range"),
                 dcc.DatePickerRange(
                     id="date-filter",
-                    start_date=DATE_MIN, end_date=DATE_MAX,
-                    min_date_allowed=DATE_MIN, max_date_allowed=DATE_MAX,
+                    # Default: first day only
+                    start_date=DATE_MIN,
+                    end_date=DATE_SECOND,
+                    min_date_allowed=DATE_MIN,
+                    max_date_allowed=DATE_MAX,
                     display_format="YYYY-MM-DD",
                 ),
             ], style={"flex": 1}),
@@ -105,10 +112,19 @@ def build_layout():
             _tab_geometry_map(),
         ]),
 
+        # ── Shared stores & animation interval ────────────────────────────
+        dcc.Store(id="selected-sites-store",    data=[]),
+        dcc.Store(id="selected-cells-store",    data=[]),
+        dcc.Store(id="animation-hour-store",    data=0),
+        dcc.Store(id="animation-playing-store", data=False),
+        dcc.Store(id="filter-update-source",    data="filters"),
+        dcc.Store(id="map-reset-token",         data=0),
+        dcc.Store(id="map-zoom-store",          data=8),
+        dcc.Interval(id="anim-interval", interval=900, n_intervals=0, disabled=True),
     ], style=APP_STYLE)
 
 
-# ---- Private tab builders ----
+# ── Private tab builders ───────────────────────────────────────────────────
 
 def _tab_kpi_analytics():
     return dcc.Tab(label="General KPI Analytics", children=[
@@ -191,8 +207,7 @@ def _tab_congestion_analytics():
                 html.Span(" — moderate", style={"fontSize": "12px", "color": "#475569"}),
             ], style={
                 "padding": "10px 16px", "background": "#fffbeb",
-                "border": "1px solid #fde68a", "borderRadius": "10px",
-                "marginBottom": "14px",
+                "border": "1px solid #fde68a", "borderRadius": "10px", "marginBottom": "14px",
             }),
             html.Div(id="congestion-cards", style={
                 "display": "grid",
@@ -229,14 +244,124 @@ def _tab_congestion_analytics():
 
 
 def _tab_geometry_map():
+    # Compute initial map centre from geo data
+    if not SITE_SUMMARY.empty:
+        center_lat = float(SITE_SUMMARY["lat"].median())
+        center_lon = float(SITE_SUMMARY["lon"].median())
+    else:
+        center_lat, center_lon = 28.0, 2.0   # fallback
+
     return dcc.Tab(label="🗺️ Geometry Map", children=[
-        html.Div(
-            "Map — to be built.",
-            style={
-                "padding": "60px",
-                "textAlign": "center",
-                "color": "#94a3b8",
-                "fontSize": "16px",
-            },
-        )
+        html.Div([
+
+            # ── Animation / control bar ────────────────────────────────────
+            html.Div([
+                html.Span("Hour of day",
+                          style={"fontSize": "12px", "color": "#64748b",
+                                 "marginRight": "10px", "fontWeight": 500,
+                                 "whiteSpace": "nowrap"}),
+                html.Button("▶ Play", id="anim-play-btn", n_clicks=0,
+                            style={**_PILL_BTN, "minWidth": "70px", "marginRight": "10px"}),
+                html.Div(dcc.Slider(
+                    id="hour-slider", min=0, max=23, step=1, value=0,
+                    marks={h: str(h) for h in [0, 3, 6, 9, 12, 15, 18, 21, 23]},
+                    tooltip={"placement": "bottom", "always_visible": False},
+                ), style={"flex": 1, "minWidth": "180px"}),
+                html.Span(id="hour-display", children="Hour 00:00",
+                          style={"fontSize": "12px", "color": "#0f172a",
+                                 "fontWeight": 600, "marginLeft": "10px",
+                                 "minWidth": "90px"}),
+                html.Button("↺ Hour 0", id="anim-reset-btn", n_clicks=0,
+                            style={**_PILL_BTN, "marginLeft": "8px"}),
+                html.Button("↺ Reset map", id="map-reset-btn", n_clicks=0,
+                            style={**_PRIMARY_BTN, "marginLeft": "16px"}),
+                html.Div([
+                    html.Span(
+                        f"Sectors visible at zoom ≥ {SECTOR_ZOOM_THRESHOLD}",
+                        style={"fontSize": "11px", "color": "#94a3b8", "marginLeft": "12px"},
+                    )
+                ]),
+            ], style={
+                "display": "flex", "alignItems": "center", "flexWrap": "wrap",
+                "padding": "10px 16px", "gap": "4px",
+                "background": "white", "border": "1px solid #e5e7eb",
+                "borderRadius": "12px", "marginBottom": "12px",
+            }),
+
+            # ── Map + side panel ───────────────────────────────────────────
+            html.Div([
+
+                # Map
+                dl.Map(
+                    id="main-map",
+                    center=[center_lat, center_lon],
+                    zoom=8,
+                    children=[
+                        dl.TileLayer(
+                            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                            attribution="© OpenStreetMap contributors",
+                            maxZoom=19,
+                        ),
+
+                        # Sector cones
+                        dl.GeoJSON(
+                            id="sectors-geojson",
+                            data={"type": "FeatureCollection", "features": []},
+                            style=SECTOR_STYLE,
+                            onEachFeature={"variable": "mapFunctions.sectorOnEachFeature"},
+                            zoomToBoundsOnClick=False,
+                        ),
+
+                        # Site markers with automatic clustering
+                        dl.GeoJSON(
+                            id="sites-geojson",
+                            data={"type": "FeatureCollection", "features": []},
+                            cluster=True,
+                            zoomToBoundsOnClick=True,
+                            superClusterOptions={
+                                "radius": 80,
+                                "maxZoom": SECTOR_ZOOM_THRESHOLD - 1,
+                            },
+                            pointToLayer=SITE_POINT_TO_LAYER,
+                            onEachFeature={"variable": "mapFunctions.siteOnEachFeature"},
+                        ),
+
+                        # Lasso / rectangle draw control
+                        dl.FeatureGroup([
+                            dl.EditControl(
+                                id="lasso-control",
+                                draw={
+                                    "polygon":      {"shapeOptions": {"color": "#0ea5e9"}},
+                                    "rectangle":    {"shapeOptions": {"color": "#0ea5e9"}},
+                                    "polyline":     False,
+                                    "circle":       False,
+                                    "marker":       False,
+                                    "circlemarker": False,
+                                },
+                                edit={"edit": False, "remove": True},
+                            )
+                        ]),
+                    ],
+                    style={
+                        "height": "680px", "flex": "1 1 0", "minWidth": 0,
+                        "borderRadius": "12px", "overflow": "hidden",
+                        "border": "1px solid #e5e7eb",
+                    },
+                ),
+
+                # Side panel
+                html.Div([
+                    html.Div(
+                        id="map-info-panel",
+                        style={
+                            "padding": "16px", "background": "white",
+                            "border": "1px solid #e5e7eb", "borderRadius": "14px",
+                            "height": "680px", "overflowY": "auto",
+                        },
+                    )
+                ], style={"width": "340px", "flexShrink": 0}),
+
+            ], style={"display": "flex", "gap": "12px"}),
+
+        ], style={"padding": "0"}),
     ])

@@ -6,16 +6,45 @@ Import this module AFTER creating the app so the callbacks attach correctly.
 import numpy as np
 import pandas as pd
 import plotly.express as px
-from dash import Input, Output, callback
+from dash import (
+    Input, Output, State,
+    callback, clientside_callback,
+    ctx, no_update,
+)
+from dash.exceptions import PreventUpdate
 
 from config import (
     CONGESTION_COLORS,
     DEFAULT_PRB_THRESHOLD, DEFAULT_THROUGHPUT_THRESHOLD, DEFAULT_ACTIVE_USER_THRESHOLD,
     MAX_SCATTER_POINTS, MAX_HIST_POINTS, P0_COLOR, P1_COLOR,
+    SECTOR_ZOOM_THRESHOLD,
 )
 from data_utils import categorical_options, downsample, make_empty_figure, numeric_columns
-from precompute import DF, get_filtered_df
-from ui_components import build_summary_cards, build_congestion_cards
+from geo_utils import split_site_key, point_in_polygon
+from precompute import (
+    DF, CELL_GEO_META, SITE_SUMMARY,
+    get_filtered_df, get_geo_visible_cells, get_cell_congestion_lookup,
+    _df_filter_cache,
+)
+from map_builder import (
+    build_sites_geojson, build_sectors_geojson,
+    find_nearest_site, find_sector_at_point,
+)
+from ui_components import build_summary_cards, build_congestion_cards, build_map_panel
+
+
+# ============================================================
+# Clientside: track map zoom in a store
+# ============================================================
+clientside_callback(
+    """function(ze) {
+        if (!ze) return window.dash_clientside.no_update;
+        if (typeof ze === 'number') return ze;
+        return ze.zoom || ze.newZoom || 8;
+    }""",
+    Output("map-zoom-store", "data"),
+    Input("main-map", "zoomend"),
+)
 
 
 # ============================================================
@@ -38,6 +67,346 @@ def update_site_and_cell_options(selected_regions, selected_sites):
         temp = temp[temp["Radio Site"].isin(selected_sites)]
     cell_options = categorical_options(temp["Cell Name"]) if "Cell Name" in temp.columns else []
     return site_options, cell_options
+
+
+# ============================================================
+# Map render — sites GeoJSON + info panel
+# ============================================================
+@callback(
+    Output("sites-geojson",   "data"),
+    Output("map-info-panel",  "children"),
+    Input("region-filter",         "value"),
+    Input("site-filter",           "value"),
+    Input("cell-filter",           "value"),
+    Input("mode-filter",           "value"),
+    Input("date-filter",           "start_date"),
+    Input("date-filter",           "end_date"),
+    Input("selected-sites-store",  "data"),
+    Input("selected-cells-store",  "data"),
+    Input("animation-hour-store",  "data"),
+)
+def update_map_sites(
+    regions, sites, cells, modes, start, end,
+    sel_sites, sel_cells, animation_hour,
+):
+    visible  = get_geo_visible_cells(regions, sites, cells)
+    cong     = get_cell_congestion_lookup(regions, sites, cells, modes, start, end, animation_hour)
+    filtered = get_filtered_df(regions, sites, cells, modes, start, end)
+
+    sites_geojson = build_sites_geojson(visible, cong, sel_sites, sel_cells)
+
+    # Build a lightweight site_df for the panel
+    if not SITE_SUMMARY.empty:
+        rows = []
+        for _, row in SITE_SUMMARY.iterrows():
+            site_cells = [c for c in row["cells"] if c in visible]
+            if not site_cells:
+                continue
+            levels = [cong.get(c) for c in site_cells if cong.get(c)]
+            worst  = ("P0" if "P0" in levels
+                      else "P1" if "P1" in levels
+                      else "Not Congested" if levels
+                      else "No Data")
+            rows.append({**row.to_dict(), "congestion": worst})
+        site_df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    else:
+        site_df = pd.DataFrame()
+
+    panel = build_map_panel(
+        sel_sites or [], sel_cells or [], visible, cong, site_df, filtered
+    )
+    return sites_geojson, panel
+
+
+# ============================================================
+# Map render — sectors GeoJSON (zoom-aware)
+# ============================================================
+@callback(
+    Output("sectors-geojson", "data"),
+    Input("region-filter",        "value"),
+    Input("site-filter",          "value"),
+    Input("cell-filter",          "value"),
+    Input("mode-filter",          "value"),
+    Input("date-filter",          "start_date"),
+    Input("date-filter",          "end_date"),
+    Input("selected-sites-store", "data"),
+    Input("selected-cells-store", "data"),
+    Input("animation-hour-store", "data"),
+    Input("map-zoom-store",       "data"),
+)
+def update_map_sectors(
+    regions, sites, cells, modes, start, end,
+    sel_sites, sel_cells, animation_hour, zoom,
+):
+    current_zoom   = zoom or 8
+    show_all       = current_zoom >= SECTOR_ZOOM_THRESHOLD
+    show_selected  = bool(sel_sites or sel_cells)
+
+    if not show_all and not show_selected:
+        return {"type": "FeatureCollection", "features": []}
+
+    visible  = get_geo_visible_cells(regions, sites, cells)
+    cong     = get_cell_congestion_lookup(regions, sites, cells, modes, start, end, animation_hour)
+
+    if not show_all and show_selected:
+        # Only show sectors for selected sites / cells
+        sel_site_set = set(sel_sites or [])
+        sel_cell_set = set(sel_cells or [])
+        visible = frozenset(
+            cn for cn in visible
+            if cn in CELL_GEO_META
+            and (CELL_GEO_META[cn]["site_key"] in sel_site_set or cn in sel_cell_set)
+        )
+
+    return build_sectors_geojson(visible, cong, sel_sites, sel_cells)
+
+
+# ============================================================
+# Map click handler — site dot or sector cone
+# ============================================================
+def _site_keys_to_filter_vals(site_keys: list) -> tuple:
+    regions, site_names = [], []
+    for key in (site_keys or []):
+        region, site = split_site_key(key)
+        if region and region not in regions:       regions.append(region)
+        if site   and site   not in site_names:    site_names.append(site)
+    return sorted(regions), sorted(site_names)
+
+
+@callback(
+    Output("selected-sites-store", "data"),
+    Output("selected-cells-store", "data"),
+    Output("region-filter",        "value"),
+    Output("site-filter",          "value"),
+    Output("cell-filter",          "value"),
+    Output("filter-update-source", "data"),
+    Input("sites-geojson",   "clickData"),
+    Input("sectors-geojson", "clickData"),
+    State("selected-sites-store", "data"),
+    State("selected-cells-store", "data"),
+    State("cell-filter",           "value"),
+    State("region-filter",         "value"),
+    State("site-filter",           "value"),
+    State("map-zoom-store",        "data"),
+    prevent_initial_call=True,
+)
+def handle_map_click(
+    site_click, sector_click,
+    cur_sites, cur_cells, cur_cell_vals,
+    cur_regions, cur_site_vals, zoom,
+):
+    # siteOnEachFeature / sectorOnEachFeature in map_functions.js inject
+    # site_key / cell_name directly into clickData via context.setProps.
+    cur_sites = cur_sites or []
+    cur_cells = cur_cells or []
+    triggered = ctx.triggered_id
+
+    # ── Site marker clicked ───────────────────────────────────────────────
+    if triggered == "sites-geojson" and site_click:
+        # Primary: enriched clickData set by siteOnEachFeature
+        site_key = site_click.get("site_key")
+
+        # Fallback: coordinate-based lookup (cluster click or plain clickData)
+        if not site_key:
+            latlng = site_click.get("latlng") or []
+            lat = latlng[0] if isinstance(latlng, (list, tuple)) and len(latlng) >= 2 \
+                  else latlng.get("lat") if isinstance(latlng, dict) else None
+            lon = latlng[1] if isinstance(latlng, (list, tuple)) and len(latlng) >= 2 \
+                  else latlng.get("lng") if isinstance(latlng, dict) else None
+            if lat is not None and lon is not None:
+                visible = get_geo_visible_cells(cur_regions, cur_site_vals, cur_cell_vals)
+                site_key = find_nearest_site(lat, lon, visible, zoom or 8)
+
+        if not site_key:
+            raise PreventUpdate
+
+        if site_key in cur_sites:
+            new_sites = [s for s in cur_sites if s != site_key]
+        else:
+            new_sites = sorted(set(cur_sites + [site_key]))
+        regions, site_names = _site_keys_to_filter_vals(new_sites)
+        return (new_sites, [], regions or no_update, site_names or no_update, [], "map")
+
+    # ── Sector cone clicked ───────────────────────────────────────────────
+    if triggered == "sectors-geojson" and sector_click:
+        # Primary: enriched clickData set by sectorOnEachFeature
+        cell_name = sector_click.get("cell_name")
+        site_key  = sector_click.get("site_key")
+
+        # Fallback: point-in-polygon lookup
+        if not cell_name:
+            latlng = sector_click.get("latlng") or []
+            lat = latlng[0] if isinstance(latlng, (list, tuple)) and len(latlng) >= 2 \
+                  else latlng.get("lat") if isinstance(latlng, dict) else None
+            lon = latlng[1] if isinstance(latlng, (list, tuple)) and len(latlng) >= 2 \
+                  else latlng.get("lng") if isinstance(latlng, dict) else None
+            if lat is not None and lon is not None:
+                visible = get_geo_visible_cells(cur_regions, cur_site_vals, cur_cell_vals)
+                cell_name, site_key = find_sector_at_point(lat, lon, visible)
+
+        if not cell_name:
+            raise PreventUpdate
+
+        new_sites = sorted(set(cur_sites + ([site_key] if site_key else [])))
+        if cell_name in cur_cells:
+            new_cells = [c for c in cur_cells if c != cell_name]
+            if not new_cells and len(new_sites) == 1 and site_key in new_sites:
+                return ([], [], no_update, [], [], "map")
+        else:
+            new_cells = sorted(set(cur_cells + [cell_name]))
+        regions, site_names = _site_keys_to_filter_vals(new_sites)
+        return (new_sites, new_cells,
+                regions or no_update, site_names or no_update,
+                new_cells or no_update, "map")
+
+    raise PreventUpdate
+
+
+# ============================================================
+# Lasso / rectangle draw → select sites within shape
+# ============================================================
+@callback(
+    Output("selected-sites-store", "data",  allow_duplicate=True),
+    Output("selected-cells-store", "data",  allow_duplicate=True),
+    Output("region-filter",        "value", allow_duplicate=True),
+    Output("site-filter",          "value", allow_duplicate=True),
+    Output("cell-filter",          "value", allow_duplicate=True),
+    Output("filter-update-source", "data",  allow_duplicate=True),
+    Input("lasso-control", "geojson"),
+    prevent_initial_call=True,
+)
+def handle_lasso(geojson):
+    if not geojson or not geojson.get("features"):
+        raise PreventUpdate
+
+    drawn = geojson["features"][-1]
+    geom  = drawn.get("geometry", {})
+    gtype = geom.get("type", "")
+
+    # Extract outer ring coordinates from Polygon or convert Rectangle bbox
+    if gtype == "Polygon":
+        ring = geom["coordinates"][0]
+    elif gtype == "Rectangle" or (gtype == "Polygon" and len(geom["coordinates"][0]) == 5):
+        ring = geom["coordinates"][0]
+    else:
+        raise PreventUpdate
+
+    if SITE_SUMMARY.empty:
+        raise PreventUpdate
+
+    selected = []
+    for _, row in SITE_SUMMARY.iterrows():
+        if point_in_polygon(float(row["lat"]), float(row["lon"]), ring):
+            selected.append(row["SiteKey"])
+
+    if not selected:
+        raise PreventUpdate
+
+    regions, site_names = _site_keys_to_filter_vals(selected)
+    return (sorted(selected), [],
+            regions or no_update, site_names or no_update, [], "map")
+
+
+# ============================================================
+# Filter bar changes → clear map selection (when driven from UI)
+# ============================================================
+@callback(
+    Output("selected-sites-store", "data", allow_duplicate=True),
+    Output("selected-cells-store", "data", allow_duplicate=True),
+    Input("region-filter", "value"),
+    Input("site-filter",   "value"),
+    Input("cell-filter",   "value"),
+    State("filter-update-source", "data"),
+    prevent_initial_call=True,
+)
+def sync_map_selection_from_filters(regions, sites, cells, source):
+    _ = (regions, sites, cells)   # trigger inputs; values not inspected
+    if source == "map":
+        return no_update, no_update
+    return [], []
+
+
+# ============================================================
+# Reset map
+# ============================================================
+@callback(
+    Output("selected-sites-store",    "data",     allow_duplicate=True),
+    Output("selected-cells-store",    "data",     allow_duplicate=True),
+    Output("region-filter",           "value",    allow_duplicate=True),
+    Output("site-filter",             "value",    allow_duplicate=True),
+    Output("cell-filter",             "value",    allow_duplicate=True),
+    Output("animation-hour-store",    "data",     allow_duplicate=True),
+    Output("hour-slider",             "value",    allow_duplicate=True),
+    Output("hour-display",            "children", allow_duplicate=True),
+    Output("animation-playing-store", "data",     allow_duplicate=True),
+    Output("anim-interval",           "disabled", allow_duplicate=True),
+    Output("anim-play-btn",           "children", allow_duplicate=True),
+    Output("filter-update-source",    "data",     allow_duplicate=True),
+    Output("map-reset-token",         "data"),
+    Input("map-reset-btn", "n_clicks"),
+    State("map-reset-token", "data"),
+    prevent_initial_call=True,
+)
+def reset_map(n_clicks, token):
+    if not n_clicks:
+        raise PreventUpdate
+    _df_filter_cache.clear()
+    return (
+        [],            # selected-sites-store
+        [],            # selected-cells-store
+        [],            # region-filter
+        [],            # site-filter
+        [],            # cell-filter
+        0,             # animation-hour-store
+        0,             # hour-slider
+        "Hour 00:00",  # hour-display
+        False,         # animation-playing-store
+        True,          # anim-interval disabled
+        "▶ Play",      # anim-play-btn
+        "filters",     # filter-update-source
+        (token or 0) + 1,  # map-reset-token (bumping forces map re-center)
+    )
+
+
+# ============================================================
+# Animation controls
+# ============================================================
+@callback(
+    Output("anim-interval",           "disabled"),
+    Output("anim-play-btn",           "children"),
+    Output("animation-playing-store", "data"),
+    Input("anim-play-btn", "n_clicks"),
+    State("animation-playing-store", "data"),
+    prevent_initial_call=True,
+)
+def toggle_animation(n, playing):
+    _ = n   # n_clicks triggers the callback; value not inspected
+    now_playing = not playing
+    return (not now_playing), ("⏸ Pause" if now_playing else "▶ Play"), now_playing
+
+
+@callback(
+    Output("animation-hour-store", "data"),
+    Output("hour-slider",          "value"),
+    Output("hour-display",         "children"),
+    Input("anim-interval",  "n_intervals"),
+    Input("hour-slider",    "value"),
+    Input("anim-reset-btn", "n_clicks"),
+    State("animation-hour-store",    "data"),
+    State("animation-playing-store", "data"),
+    prevent_initial_call=True,
+)
+def update_animation_hour(n_intervals, slider_val, reset_clicks, current_hour, playing):
+    _ = (n_intervals, reset_clicks)   # trigger inputs; values not inspected directly
+    triggered = ctx.triggered_id
+    if triggered == "anim-reset-btn":
+        return 0, 0, "Hour 00:00"
+    if triggered == "anim-interval" and playing:
+        next_hour = ((current_hour or 0) + 1) % 24
+        return next_hour, next_hour, f"Hour {next_hour:02d}:00"
+    if triggered == "hour-slider":
+        return slider_val, slider_val, f"Hour {slider_val:02d}:00"
+    return current_hour, (current_hour or 0), f"Hour {(current_hour or 0):02d}:00"
 
 
 # ============================================================
@@ -218,17 +587,11 @@ def update_dashboard(
         level_rows = []
         if "Cell Name" in filtered.columns:
             if has_p0:
-                level_rows.append({
-                    "Tier": "P0 (Severe)",
-                    "Congested Cells":
-                        filtered[filtered["P0_Congestion"] == True]["Cell Name"].nunique()
-                })
+                level_rows.append({"Tier": "P0 (Severe)",
+                                    "Congested Cells": filtered[filtered["P0_Congestion"] == True]["Cell Name"].nunique()})
             if has_p1:
-                level_rows.append({
-                    "Tier": "P1 (Moderate)",
-                    "Congested Cells":
-                        filtered[filtered["P1_Congestion"] == True]["Cell Name"].nunique()
-                })
+                level_rows.append({"Tier": "P1 (Moderate)",
+                                    "Congested Cells": filtered[filtered["P1_Congestion"] == True]["Cell Name"].nunique()})
         if not level_rows:
             fig_cong_level = make_empty_figure("P0 / P1 Congestion Comparison")
         else:
@@ -332,11 +695,9 @@ def update_dashboard(
                                    title="Busy Hour Distribution")
             fig_busy_hour.update_layout(template="plotly_white")
 
-    # PRB vs Throughput scatter (colored by congestion)
+    # PRB vs Throughput scatter
     throughput_col = next(
-        (c for c in ["LTE DL User Throughput", "DL Avg Throughput"] if c in filtered.columns),
-        None,
-    )
+        (c for c in ["LTE DL User Throughput", "DL Avg Throughput"] if c in filtered.columns), None)
     if filtered.empty or "DL PRB Load" not in filtered.columns or throughput_col is None:
         fig_cong_scatter = make_empty_figure("PRB vs Throughput")
     else:
@@ -344,20 +705,16 @@ def update_dashboard(
         if has_p0 and has_p1:
             cdf["CongestionFlag"] = np.select(
                 [cdf["P0_Congestion"] == True, cdf["P1_Congestion"] == True],
-                ["P0 (Severe)", "P1 (Moderate)"], default="Not Congested",
-            )
+                ["P0 (Severe)", "P1 (Moderate)"], default="Not Congested")
         elif has_p1:
-            cdf["CongestionFlag"] = np.where(
-                cdf["P1_Congestion"] == True, "P1 (Moderate)", "Not Congested")
+            cdf["CongestionFlag"] = np.where(cdf["P1_Congestion"] == True, "P1 (Moderate)", "Not Congested")
         elif has_p0:
-            cdf["CongestionFlag"] = np.where(
-                cdf["P0_Congestion"] == True, "P0 (Severe)", "Not Congested")
+            cdf["CongestionFlag"] = np.where(cdf["P0_Congestion"] == True, "P0 (Severe)", "Not Congested")
         else:
             cdf["CongestionFlag"] = "Not Congested"
         cdf = downsample(
-            cdf[[c for c in ["DL PRB Load", throughput_col, "Cell Name",
-                              "Time", "CongestionFlag"] if c in cdf.columns]]
-            .dropna(subset=["DL PRB Load", throughput_col]),
+            cdf[[c for c in ["DL PRB Load", throughput_col, "Cell Name", "Time", "CongestionFlag"]
+                 if c in cdf.columns]].dropna(subset=["DL PRB Load", throughput_col]),
             MAX_SCATTER_POINTS,
         )
         fig_cong_scatter = px.scatter(

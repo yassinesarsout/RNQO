@@ -32,6 +32,24 @@ P1_COLOR = CONGESTION_COLORS["P1"]
 
 _FILTER_CACHE_MAX = 8
 
+# ---- Geo / map configuration ----
+GEO_DATA_PATH    = "datasets/final_info_data.csv"
+SITE_KEY_SEP     = "||"
+FIXED_HALF_ANGLE = 32       # degrees, ± around azimuth
+CONE_POINTS      = 12       # arc sample points per sector
+SECTOR_ZOOM_THRESHOLD = 13  # show sectors at this Leaflet zoom and above
+NO_DATA_COLOR    = "#94a3b8"
+
+# Base range (m) by coverage type — NOT from expected_cell_range column
+COVERAGE_RANGES = {
+    "Dense Urban": 350,
+    "Urban":       550,
+    "Suburban":    950,
+    "Rural":      1700,
+}
+DEFAULT_CONE_RANGE   = 700   # used when coverage type is unknown
+CELL_RANGE_INCREMENT = 160   # extra meters per cell index within same site
+
 # ---- UI styles ----
 CARD_STYLE = {
     "padding": "14px 16px",
