@@ -40,15 +40,11 @@ CONE_POINTS      = 12       # arc sample points per sector
 SECTOR_ZOOM_THRESHOLD = 13  # show sectors at this Leaflet zoom and above
 NO_DATA_COLOR    = "#94a3b8"
 
-# Base range (m) by coverage type — NOT from expected_cell_range column
-COVERAGE_RANGES = {
-    "Dense Urban": 350,
-    "Urban":       550,
-    "Suburban":    950,
-    "Rural":      1700,
-}
-DEFAULT_CONE_RANGE   = 700   # used when coverage type is unknown
-CELL_RANGE_INCREMENT = 160   # extra meters per cell index within same site
+# ---- Cone radius — derived from Average Timing Advance (already in metres) ----
+TA_COLUMN        = "Average Timing Advance"   # KPI column name
+MIN_CONE_RANGE_M = 200.0    # floor  (very small urban cells)
+MAX_CONE_RANGE_M = 2500.0   # ceiling (large rural cells)
+DEFAULT_CONE_RANGE = 600.0  # fallback when TA is unavailable for a cell
 
 # ---- UI styles ----
 CARD_STYLE = {

@@ -21,7 +21,7 @@ import pandas as pd
 
 from config import (
     DATA_PATH, GEO_DATA_PATH, _FILTER_CACHE_MAX,
-    COVERAGE_RANGES, DEFAULT_CONE_RANGE, CELL_RANGE_INCREMENT,
+    TA_COLUMN, MIN_CONE_RANGE_M, MAX_CONE_RANGE_M, DEFAULT_CONE_RANGE,
 )
 from geo_utils import _edges_vectorized, make_site_key, normalize_level
 from data_utils import load_dataframe, numeric_columns, _filter_dataframe_impl
@@ -138,20 +138,32 @@ if not GEO_DF.empty:
                    if "CoverageType" in _geo.columns
                    else np.array([""] * len(_geo)))
 
-    # ---- Assign per-cell range based on coverage type + index within site ----
-    # Group cells by site, sort by azimuth, assign increasing range per index
+    # ---- Per-cell cone radius derived from Average Timing Advance ----
+    # TA column is already in metres (pre-converted by the network export).
+    # Formula: clamp(ta_metres, MIN_CONE_RANGE_M, MAX_CONE_RANGE_M).
+    # Cells with no TA data in the KPI set fall back to DEFAULT_CONE_RANGE.
     _sk_list = [make_site_key(_regions[i], _sites[i]) for i in range(len(_geo))]
-    _site_az_idx: dict = {}  # site_key → [(azimuth, geo_row_index)]
-    for i in range(len(_geo)):
-        _site_az_idx.setdefault(_sk_list[i], []).append((float(_azs[i]), i))
 
-    _cell_ranges = np.zeros(len(_geo), dtype=float)
-    for _sk, _pairs in _site_az_idx.items():
-        _sorted = sorted(_pairs)  # sort by azimuth → stable cell index
-        for _cell_idx, (_, _geo_idx) in enumerate(_sorted):
-            _cov       = str(_coverages[_geo_idx])
-            _base      = COVERAGE_RANGES.get(_cov, DEFAULT_CONE_RANGE)
-            _cell_ranges[_geo_idx] = _base + _cell_idx * CELL_RANGE_INCREMENT
+    _ta_per_cell: dict = {}
+    if not DF.empty and "Cell Name" in DF.columns and TA_COLUMN in DF.columns:
+        _ta_agg = (
+            DF[["Cell Name", TA_COLUMN]]
+            .dropna(subset=["Cell Name", TA_COLUMN])
+            .groupby("Cell Name")[TA_COLUMN]
+            .mean()
+        )
+        for _cn, _ta_val in _ta_agg.items():
+            _ta_per_cell[str(_cn)] = float(_ta_val)
+
+    def _radius_from_ta(ta_val):
+        if pd.isna(ta_val):
+            return DEFAULT_CONE_RANGE
+        return float(np.clip(ta_val, MIN_CONE_RANGE_M, MAX_CONE_RANGE_M))
+
+    _cell_ranges = np.array([
+        _radius_from_ta(_ta_per_cell.get(_cell_names[i]))
+        for i in range(len(_geo))
+    ], dtype=float)
 
     # ---- Vectorised cone computation ----
     if len(_geo) > 0:
@@ -174,7 +186,8 @@ if not GEO_DF.empty:
                 "lat":      _lat,
                 "lon":      _lon,
                 "azimuth":  float(_azs[_i]),
-                "range_m":  float(_cell_ranges[_i]),
+                "range_m":  float(_cell_ranges[_i]),   # TA-derived radius
+                "ta_m":     _ta_per_cell.get(_cn),     # raw TA value (m), may be None
                 "site_key": _sk_list[_i],
                 "region":   _regions[_i],
                 "site":     _sites[_i],

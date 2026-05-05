@@ -174,7 +174,9 @@ def build_map_panel(
                 _kpi_row("Site",     meta["site"]),
                 _kpi_row("Region",   meta["region"]),
                 _kpi_row("Azimuth",  f"{meta['azimuth']:.0f}°"),
-                _kpi_row("Range",    f"{meta['range_m']:.0f} m"),
+                _kpi_row("Avg TA",   f"{meta['ta_m']:.0f} m"
+                                     if meta.get("ta_m") is not None else "—"),
+                _kpi_row("Cone radius", f"{meta['range_m']:.0f} m"),
                 _kpi_row("Coverage", meta["coverage"] or "—"),
                 html.Div([
                     html.Span("Congestion: ",
