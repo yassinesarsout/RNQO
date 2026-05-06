@@ -310,6 +310,7 @@ def _tab_geometry_map():
                             style=SECTOR_STYLE,
                             onEachFeature={"variable": "mapFunctions.sectorOnEachFeature"},
                             zoomToBoundsOnClick=False,
+                            disableDefaultEventHandlers=True,
                         ),
 
                         # Site markers with automatic clustering
@@ -324,6 +325,7 @@ def _tab_geometry_map():
                             },
                             pointToLayer=SITE_POINT_TO_LAYER,
                             onEachFeature={"variable": "mapFunctions.siteOnEachFeature"},
+                            disableDefaultEventHandlers=True,
                         ),
 
                         # Lasso / rectangle draw control
