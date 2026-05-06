@@ -37,7 +37,7 @@ GEO_DATA_PATH    = "datasets/final_info_data.csv"
 SITE_KEY_SEP     = "||"
 FIXED_HALF_ANGLE = 32       # degrees, ± around azimuth
 CONE_POINTS      = 12       # arc sample points per sector
-SECTOR_ZOOM_THRESHOLD = 13  # show sectors at this Leaflet zoom and above
+SECTOR_ZOOM_THRESHOLD = 15  # show sectors at this Leaflet zoom and above
 NO_DATA_COLOR    = "#94a3b8"
 
 # ---- Cone radius — derived from Average Timing Advance (already in metres) ----

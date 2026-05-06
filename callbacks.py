@@ -38,12 +38,12 @@ from ui_components import build_summary_cards, build_congestion_cards, build_map
 # ============================================================
 clientside_callback(
     """function(ze) {
-        if (!ze) return window.dash_clientside.no_update;
+        if (ze == null) return window.dash_clientside.no_update;
         if (typeof ze === 'number') return ze;
         return ze.zoom || ze.newZoom || 8;
     }""",
     Output("map-zoom-store", "data"),
-    Input("main-map", "zoomend"),
+    Input("main-map", "zoom"),
 )
 
 
