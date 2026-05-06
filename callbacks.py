@@ -158,7 +158,7 @@ def update_map_sectors(
             and (CELL_GEO_META[cn]["site_key"] in sel_site_set or cn in sel_cell_set)
         )
 
-    return build_sectors_geojson(visible, cong, sel_sites, sel_cells)
+    return build_sectors_geojson(visible, cong, sel_sites, sel_cells, zoom=current_zoom)
 
 
 # ============================================================
