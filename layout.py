@@ -21,6 +21,8 @@ from precompute import (
     SITE_SUMMARY,
 )
 from map_builder import SITE_POINT_TO_LAYER, SECTOR_STYLE
+from forecast_tab_layout import build_forecast_tab
+from forecast_tab_layout import build_forecast_tab   # ← NEW
 
 
 def build_layout():
@@ -110,6 +112,7 @@ def build_layout():
             _tab_kpi_analytics(),
             _tab_congestion_analytics(),
             _tab_geometry_map(),
+            build_forecast_tab(),          # ← NEW 4th tab
         ]),
 
         # ── Shared stores & animation interval ────────────────────────────
@@ -120,6 +123,7 @@ def build_layout():
         dcc.Store(id="filter-update-source",    data="filters"),
         dcc.Store(id="map-reset-token",         data=0),
         dcc.Store(id="map-zoom-store",          data=8),
+        dcc.Store(id="_map-export-dummy",       data=None),
         dcc.Interval(id="anim-interval", interval=900, n_intervals=0, disabled=True),
     ], style=APP_STYLE)
 
@@ -183,6 +187,7 @@ def _tab_kpi_analytics():
                 dash_table.DataTable(
                     id="detail-table", page_size=TABLE_PAGE_SIZE,
                     sort_action="native", filter_action="native", page_action="native",
+                    export_format="csv", export_headers="display",
                     style_table={"overflowX": "auto", "maxHeight": "650px", "overflowY": "auto"},
                     style_cell={"textAlign": "left", "minWidth": "120px",
                                 "width": "120px", "maxWidth": "220px", "padding": "8px"},
@@ -227,6 +232,7 @@ def _tab_congestion_analytics():
                 dash_table.DataTable(
                     id="congestion-table", page_size=TABLE_PAGE_SIZE,
                     sort_action="native", filter_action="native", page_action="native",
+                    export_format="csv", export_headers="display",
                     style_table={"overflowX": "auto", "maxHeight": "650px", "overflowY": "auto"},
                     style_cell={"textAlign": "left", "minWidth": "120px",
                                 "width": "120px", "maxWidth": "220px", "padding": "8px"},
@@ -275,6 +281,8 @@ def _tab_geometry_map():
                             style={**_PILL_BTN, "marginLeft": "8px"}),
                 html.Button("↺ Reset map", id="map-reset-btn", n_clicks=0,
                             style={**_PRIMARY_BTN, "marginLeft": "16px"}),
+                html.Button("📷 Export PNG", id="map-export-btn", n_clicks=0,
+                            style={**_PILL_BTN, "marginLeft": "8px"}),
                 html.Div([
                     html.Span(
                         f"Sectors visible at zoom ≥ {SECTOR_ZOOM_THRESHOLD}",
@@ -289,7 +297,7 @@ def _tab_geometry_map():
             }),
 
             # ── Map + side panel ───────────────────────────────────────────
-            html.Div([
+            html.Div(id="map-export-area", children=[
 
                 # Map
                 dl.Map(

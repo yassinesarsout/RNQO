@@ -4,25 +4,31 @@ RAN KPI Congestion Dashboard — entry point.
 Run with:  python dashboardV3.py
 
 The dashboard is split across these modules:
-  config.py        — constants & UI styles
-  geo_utils.py     — geometry helpers (vectorized sector edges, zoom, etc.)
-  data_utils.py    — pure data utilities (load, filter, sample, empty figures)
-  precompute.py    — data loading + module-level precomputation (polygons, caches)
-  map_builder.py   — Plotly map trace builders + figure assembly
-  ui_components.py — HTML card & side panel builders
-  layout.py        — full Dash layout definition
-  callbacks.py     — all @callback-decorated functions
+  config.py             — constants & UI styles
+  geo_utils.py          — geometry helpers
+  data_utils.py         — pure data utilities
+  precompute.py         — data loading + precomputation
+  map_builder.py        — Plotly map trace builders
+  ui_components.py      — HTML card & side panel builders
+  layout.py             — full Dash layout definition
+  callbacks.py          — existing @callback-decorated functions
+  forecast_tab_layout.py — 🔮 AI Forecasting tab layout
+  forecast_callbacks.py  — 🔮 AI Forecasting tab callbacks
 """
 
 from dash import Dash
 
-app = Dash(__name__)
+app = Dash(
+    __name__,
+    external_scripts=[
+        "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"
+    ],
+)
 app.title = "RAN KPI Dashboard"
 
-# Import layout and callbacks AFTER the app is created so that
-# @callback decorators attach to the correct app context.
-from layout import build_layout  # noqa: E402
-__import__("callbacks")  # side-effect: registers all @callback decorators
+from layout import build_layout        # noqa: E402
+__import__("callbacks")                # registers existing callbacks
+__import__("forecast_callbacks")       # registers forecast tab callbacks  ← NEW
 
 app.layout = build_layout()
 

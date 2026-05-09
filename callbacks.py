@@ -48,6 +48,37 @@ clientside_callback(
 
 
 # ============================================================
+# Map PNG export — clientside screenshot via html2canvas
+# ============================================================
+clientside_callback(
+    """function(n) {
+        if (!n) return window.dash_clientside.no_update;
+        var el = document.getElementById('map-export-area');
+        if (!el || typeof html2canvas === 'undefined') return window.dash_clientside.no_update;
+        html2canvas(el, {
+            useCORS:         true,
+            allowTaint:      true,
+            scale:           2,
+            logging:         false,
+            backgroundColor: '#f8fafc'
+        }).then(function(canvas) {
+            var ts  = new Date().toISOString().slice(0, 10);
+            var a   = document.createElement('a');
+            a.download = 'map_' + ts + '.png';
+            a.href     = canvas.toDataURL('image/png');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        });
+        return window.dash_clientside.no_update;
+    }""",
+    Output("_map-export-dummy", "data"),
+    Input("map-export-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+
+
+# ============================================================
 # Cascading dropdowns: Region → Site → Cell Name
 # ============================================================
 @callback(
