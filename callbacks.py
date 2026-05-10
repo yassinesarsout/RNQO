@@ -6,6 +6,7 @@ Import this module AFTER creating the app so the callbacks attach correctly.
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from dash import (
     Input, Output, State,
     callback, clientside_callback,
@@ -33,6 +34,35 @@ from map_builder import (
 from ui_components import build_summary_cards, build_congestion_cards, build_map_panel
 
 
+# ── Shared chart styling ───────────────────────────────────────────────────
+_FONT = "Inter, 'Segoe UI', system-ui, sans-serif"
+_PALETTE = ["#6366f1", "#06b6d4", "#f59e0b", "#10b981",
+            "#ef4444", "#8b5cf6", "#f97316", "#0ea5e9"]
+
+def _cl(**extra) -> dict:
+    """Return a consistent modern Plotly layout dict."""
+    base = {
+        "template":      "plotly_white",
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "plot_bgcolor":  "rgba(0,0,0,0)",
+        "font":          {"family": _FONT, "size": 12, "color": "#334155"},
+        "margin":        {"t": 48, "l": 10, "r": 10, "b": 10},
+        "xaxis":         {"gridcolor": "#f1f5f9", "linecolor": "#e2e8f0",
+                          "zeroline": False, "tickfont": {"size": 11}},
+        "yaxis":         {"gridcolor": "#f1f5f9", "linecolor": "#e2e8f0",
+                          "zeroline": False, "tickfont": {"size": 11}},
+        "legend":        {"bgcolor": "rgba(255,255,255,0.85)",
+                          "bordercolor": "#e2e8f0", "borderwidth": 1,
+                          "font": {"size": 11}},
+        "hoverlabel":    {"bgcolor": "white", "bordercolor": "#e2e8f0",
+                          "font": {"family": _FONT, "size": 12}},
+        "title":         {"font": {"size": 14, "color": "#0f172a", "family": _FONT},
+                          "x": 0.02, "xanchor": "left"},
+    }
+    base.update(extra)
+    return base
+
+
 # ============================================================
 # Clientside: track map zoom in a store
 # ============================================================
@@ -45,6 +75,34 @@ clientside_callback(
     Output("map-zoom-store", "data"),
     Input("main-map", "zoom"),
 )
+
+
+# ============================================================
+# Sector approach toggle — TA Range ↔ Freq Shape
+# ============================================================
+_APPROACH_BTN_BASE = {
+    "padding": "5px 14px", "borderRadius": "20px", "fontSize": "12px",
+    "cursor": "pointer", "fontFamily": "Inter, Arial, sans-serif",
+    "marginLeft": "8px",
+}
+_APPROACH_BTN_OFF = {**_APPROACH_BTN_BASE,
+                     "background": "white", "border": "1px solid #e2e8f0", "color": "#0f172a"}
+_APPROACH_BTN_ON  = {**_APPROACH_BTN_BASE,
+                     "background": "#0ea5e9", "border": "1px solid #0ea5e9", "color": "white",
+                     "fontWeight": 600}
+
+@callback(
+    Output("sector-approach-store",  "data"),
+    Output("sector-approach-btn",    "children"),
+    Output("sector-approach-btn",    "style"),
+    Input("sector-approach-btn",     "n_clicks"),
+    State("sector-approach-store",   "data"),
+    prevent_initial_call=True,
+)
+def toggle_sector_approach(_, current):
+    if current == "ta":
+        return "freq", "📡 TA Range",   _APPROACH_BTN_ON
+    return     "ta",  "📡 Freq Shape",  _APPROACH_BTN_OFF
 
 
 # ============================================================
@@ -112,17 +170,22 @@ def update_site_and_cell_options(selected_regions, selected_sites):
     Input("mode-filter",           "value"),
     Input("date-filter",           "start_date"),
     Input("date-filter",           "end_date"),
-    Input("selected-sites-store",  "data"),
-    Input("selected-cells-store",  "data"),
-    Input("animation-hour-store",  "data"),
+    Input("selected-sites-store",   "data"),
+    Input("selected-cells-store",   "data"),
+    Input("animation-hour-store",   "data"),
+    Input("map-congestion-filter",  "value"),
 )
 def update_map_sites(
     regions, sites, cells, modes, start, end,
-    sel_sites, sel_cells, animation_hour,
+    sel_sites, sel_cells, animation_hour, congestion_filter,
 ):
     visible  = get_geo_visible_cells(regions, sites, cells)
     cong     = get_cell_congestion_lookup(regions, sites, cells, modes, start, end, animation_hour)
     filtered = get_filtered_df(regions, sites, cells, modes, start, end)
+
+    if congestion_filter in ("p0", "p1"):
+        target  = "P0" if congestion_filter == "p0" else "P1"
+        visible = frozenset(cn for cn in visible if cong.get(cn) == target)
 
     sites_geojson = build_sites_geojson(visible, cong, sel_sites, sel_cells)
 
@@ -162,12 +225,14 @@ def update_map_sites(
     Input("date-filter",          "end_date"),
     Input("selected-sites-store", "data"),
     Input("selected-cells-store", "data"),
-    Input("animation-hour-store", "data"),
-    Input("map-zoom-store",       "data"),
+    Input("animation-hour-store",   "data"),
+    Input("map-zoom-store",         "data"),
+    Input("sector-approach-store",  "data"),
+    Input("map-congestion-filter",  "value"),
 )
 def update_map_sectors(
     regions, sites, cells, modes, start, end,
-    sel_sites, sel_cells, animation_hour, zoom,
+    sel_sites, sel_cells, animation_hour, zoom, approach, congestion_filter,
 ):
     current_zoom   = zoom or 8
     show_all       = current_zoom >= SECTOR_ZOOM_THRESHOLD
@@ -179,6 +244,10 @@ def update_map_sectors(
     visible  = get_geo_visible_cells(regions, sites, cells)
     cong     = get_cell_congestion_lookup(regions, sites, cells, modes, start, end, animation_hour)
 
+    if congestion_filter in ("p0", "p1"):
+        target  = "P0" if congestion_filter == "p0" else "P1"
+        visible = frozenset(cn for cn in visible if cong.get(cn) == target)
+
     if not show_all and show_selected:
         # Only show sectors for selected sites / cells
         sel_site_set = set(sel_sites or [])
@@ -189,7 +258,10 @@ def update_map_sectors(
             and (CELL_GEO_META[cn]["site_key"] in sel_site_set or cn in sel_cell_set)
         )
 
-    return build_sectors_geojson(visible, cong, sel_sites, sel_cells, zoom=current_zoom)
+    return build_sectors_geojson(
+        visible, cong, sel_sites, sel_cells,
+        zoom=current_zoom, approach=approach or "ta",
+    )
 
 
 # ============================================================
@@ -455,7 +527,8 @@ def update_animation_hour(n_intervals, slider_val, reset_clicks, current_hour, p
     Output("detail-table",                "data"),
     Output("detail-table",                "columns"),
     Output("congestion-cards",            "children"),
-    Output("congestion-level-chart",      "figure"),
+    Output("congestion-by-region-chart",  "figure"),
+    Output("congestion-by-freq-chart",    "figure"),
     Output("congestion-timeseries-chart", "figure"),
     Output("top-congested-cells-chart",   "figure"),
     Output("busy-hour-chart",             "figure"),
@@ -495,22 +568,24 @@ def update_dashboard(
     )
     cards = build_summary_cards(filtered)
 
-    # ---- Time-series ----
+    # ---- Time-series (area chart) ----
     def _timeseries(kpi_name, suffix=""):
         if filtered.empty or kpi_name is None or kpi_name not in filtered.columns:
             return make_empty_figure("Time Series")
         n_sel = len(selected_cells) if selected_cells else 0
         show_cells = 1 <= n_sel <= 10 and "Cell Name" in filtered.columns
+        title = f"{kpi_name}{suffix}"
         if show_cells:
             plot_df = (filtered.groupby(["Time", "Cell Name"], as_index=False)[kpi_name]
                        .mean().sort_values("Time"))
-            fig = px.line(plot_df, x="Time", y=kpi_name, color="Cell Name",
-                          title=f"{kpi_name} over Time{suffix}")
+            fig = px.area(plot_df, x="Time", y=kpi_name, color="Cell Name",
+                          title=title, color_discrete_sequence=_PALETTE)
         else:
-            agg = (filtered.groupby(["Time"], as_index=False)[kpi_name]
+            agg = (filtered.groupby("Time", as_index=False)[kpi_name]
                    .mean().sort_values("Time"))
-            fig = px.line(agg, x="Time", y=kpi_name,
-                          title=f"{kpi_name} over Time{suffix} (Average)")
+            fig = px.area(agg, x="Time", y=kpi_name, title=title,
+                          color_discrete_sequence=["#6366f1"])
+            fig.update_traces(fillcolor="rgba(99,102,241,0.12)", line_color="#6366f1")
         threshold = None
         if kpi_name == "DL PRB Load":
             threshold = DEFAULT_PRB_THRESHOLD
@@ -519,35 +594,60 @@ def update_dashboard(
         elif kpi_name == "Active Users":
             threshold = DEFAULT_ACTIVE_USER_THRESHOLD
         if threshold is not None:
-            fig.add_hline(y=threshold, line_dash="dash",
-                          annotation_text=f"Threshold {threshold}")
-        fig.update_layout(template="plotly_white")
+            fig.add_hline(y=threshold, line_dash="dot", line_color="#ef4444",
+                          line_width=1.5,
+                          annotation_text=f"⚠ {threshold}",
+                          annotation_font_color="#ef4444")
+        fig.update_layout(**_cl())
         return fig
 
-    fig_time   = _timeseries(main_kpi,   " · Panel 1")
-    fig_time_2 = _timeseries(main_kpi_2, " · Panel 2")
-    fig_time_3 = _timeseries(main_kpi_3, " · Panel 3")
+    fig_time   = _timeseries(main_kpi,   " — Panel 1")
+    fig_time_2 = _timeseries(main_kpi_2, " — Panel 2")
+    fig_time_3 = _timeseries(main_kpi_3, " — Panel 3")
 
-    # ---- Histogram ----
+    # ---- Violin distribution ----
     if filtered.empty or hist_kpi is None or hist_kpi not in filtered.columns:
         fig_hist = make_empty_figure("Distribution")
     else:
-        hist_df = downsample(filtered[[hist_kpi]].dropna(), MAX_HIST_POINTS)
-        fig_hist = px.histogram(hist_df, x=hist_kpi, nbins=40,
-                                title=f"Distribution of {hist_kpi}")
-        fig_hist.update_layout(template="plotly_white")
+        vdf = downsample(
+            filtered[[hist_kpi] + (["Region"] if "Region" in filtered.columns else [])
+                      ].dropna(subset=[hist_kpi]),
+            MAX_HIST_POINTS,
+        )
+        if "Region" in vdf.columns and vdf["Region"].nunique() > 1:
+            fig_hist = px.violin(
+                vdf, y=hist_kpi, x="Region", box=True, points=False,
+                title=f"{hist_kpi} — distribution by region",
+                color="Region", color_discrete_sequence=_PALETTE,
+            )
+        else:
+            fig_hist = px.violin(
+                vdf, y=hist_kpi, box=True, points="outliers",
+                title=f"{hist_kpi} — distribution",
+                color_discrete_sequence=["#6366f1"],
+            )
+        fig_hist.update_layout(**_cl())
 
-    # ---- Top cells ----
+    # ---- Top cells (gradient bar) ----
     if (filtered.empty or top_kpi is None or top_kpi not in filtered.columns
             or "Cell Name" not in filtered.columns):
         fig_top = make_empty_figure("Top Cells")
     else:
         top = (filtered.groupby("Cell Name", as_index=False)[top_kpi]
                .mean().sort_values(top_kpi, ascending=False).head(15))
-        fig_top = px.bar(top, x=top_kpi, y="Cell Name", orientation="h",
-                         title=f"Top 15 Cells by Avg {top_kpi}")
-        fig_top.update_layout(template="plotly_white",
-                              yaxis={"categoryorder": "total ascending"})
+        fig_top = px.bar(
+            top, x=top_kpi, y="Cell Name", orientation="h",
+            title=f"Top 15 Cells — avg {top_kpi}",
+            color=top_kpi,
+            color_continuous_scale=["#c7d2fe", "#6366f1", "#4338ca"],
+            text=top_kpi,
+        )
+        fig_top.update_traces(texttemplate="%{text:.1f}", textposition="outside",
+                              marker_line_width=0)
+        fig_top.update_layout(**_cl(
+            yaxis={"categoryorder": "total ascending", "tickfont": {"size": 10}},
+            coloraxis_showscale=False,
+        ))
 
     # ---- Scatter ----
     if filtered.empty or scatter_x not in filtered.columns or scatter_y not in filtered.columns:
@@ -567,13 +667,16 @@ def update_dashboard(
         )
         fig_scatter = px.scatter(
             scatter_df, x=scatter_x, y=scatter_y, color=color_arg,
+            opacity=0.65,
+            color_discrete_sequence=_PALETTE,
             hover_data=[c for c in ["Cell Name", "Region", "Radio Site", "Time",
                                      "FinalCongestionScore", "CongestionLevel",
                                      "P0_Congestion", "P1_Congestion"]
                         if c in scatter_df.columns],
             title=f"{scatter_y} vs {scatter_x}",
         )
-        fig_scatter.update_layout(template="plotly_white")
+        fig_scatter.update_traces(marker={"size": 5, "line": {"width": 0}})
+        fig_scatter.update_layout(**_cl())
 
     # ---- Correlation heatmap ----
     num_cols = [c for c in numeric_columns(filtered)
@@ -585,8 +688,13 @@ def update_dashboard(
         fig_corr = make_empty_figure("Correlation")
     else:
         corr = filtered[corr_cols].corr(numeric_only=True)
-        fig_corr = px.imshow(corr, aspect="auto", title="Correlation Heatmap")
-        fig_corr.update_layout(template="plotly_white")
+        fig_corr = px.imshow(
+            corr, aspect="auto", title="KPI Correlation Matrix",
+            color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
+            text_auto=".2f",
+        )
+        fig_corr.update_traces(textfont={"size": 10})
+        fig_corr.update_layout(**_cl(margin={"t": 48, "l": 60, "r": 10, "b": 60}))
 
     # ---- Detail table ----
     display_cols = [c for c in [
@@ -611,35 +719,71 @@ def update_dashboard(
     has_p0 = "P0_Congestion" in filtered.columns
     has_p1 = "P1_Congestion" in filtered.columns
 
-    # P0 vs P1 bar
-    if filtered.empty or (not has_p0 and not has_p1):
-        fig_cong_level = make_empty_figure("P0 / P1 Congestion Comparison")
+    # ---- Congestion by Region ----
+    _no_cong = filtered.empty or (not has_p0 and not has_p1) or "Cell Name" not in filtered.columns
+    if _no_cong or "Region" not in filtered.columns:
+        fig_by_region = make_empty_figure("Congestion by Region")
     else:
-        level_rows = []
-        if "Cell Name" in filtered.columns:
+        _region_rows = []
+        for _reg in sorted(filtered["Region"].dropna().unique()):
+            _rdf = filtered[filtered["Region"] == _reg]
             if has_p0:
-                level_rows.append({"Tier": "P0 (Severe)",
-                                    "Congested Cells": filtered[filtered["P0_Congestion"] == True]["Cell Name"].nunique()})
+                _n = _rdf[_rdf["P0_Congestion"] == True]["Cell Name"].nunique()
+                if _n: _region_rows.append({"Region": _reg, "Tier": "P0 (Severe)",   "Congested Cells": _n})
             if has_p1:
-                level_rows.append({"Tier": "P1 (Moderate)",
-                                    "Congested Cells": filtered[filtered["P1_Congestion"] == True]["Cell Name"].nunique()})
-        if not level_rows:
-            fig_cong_level = make_empty_figure("P0 / P1 Congestion Comparison")
+                _n = _rdf[_rdf["P1_Congestion"] == True]["Cell Name"].nunique()
+                if _n: _region_rows.append({"Region": _reg, "Tier": "P1 (Moderate)", "Congested Cells": _n})
+        if not _region_rows:
+            fig_by_region = make_empty_figure("Congestion by Region")
         else:
-            level_df = pd.DataFrame(level_rows)
-            fig_cong_level = px.bar(
-                level_df, x="Tier", y="Congested Cells",
-                title="Distinct Congested Cells by Tier (P0 vs P1)",
-                color="Tier",
+            _rdf2 = pd.DataFrame(_region_rows)
+            fig_by_region = px.bar(
+                _rdf2, x="Region", y="Congested Cells", color="Tier", barmode="group",
+                title="Congested Cells by Region",
                 color_discrete_map={"P0 (Severe)": P0_COLOR, "P1 (Moderate)": P1_COLOR},
                 text="Congested Cells",
             )
-            fig_cong_level.update_traces(textposition="outside")
-            fig_cong_level.update_layout(template="plotly_white", showlegend=False)
+            fig_by_region.update_traces(texttemplate="%{text}", textposition="outside",
+                                        marker_line_width=0)
+            fig_by_region.update_layout(**_cl(xaxis_tickangle=-30))
 
-    # P0 vs P1 timeseries
+    # ---- Congestion by Frequency — sunburst ----
+    if _no_cong:
+        fig_by_freq = make_empty_figure("Congestion by Frequency Band")
+    else:
+        _freq_map = ({cn: m.get("frequency", "Unknown")
+                      for cn, m in CELL_GEO_META.items()} if CELL_GEO_META else {})
+        _fdf = filtered.copy()
+        _fdf["Frequency"] = _fdf["Cell Name"].map(_freq_map).fillna("Unknown")
+        _freq_order = ["800", "1800", "2100", "tdd", "TDD", "Unknown"]
+        _freq_rows = []
+        for _freq in sorted(_fdf["Frequency"].dropna().unique(),
+                            key=lambda x: _freq_order.index(str(x))
+                            if str(x) in _freq_order else 99):
+            _fgrp = _fdf[_fdf["Frequency"] == _freq]
+            if has_p0:
+                _n = _fgrp[_fgrp["P0_Congestion"] == True]["Cell Name"].nunique()
+                if _n: _freq_rows.append({"Frequency": str(_freq), "Tier": "P0 (Severe)",   "Cells": _n})
+            if has_p1:
+                _n = _fgrp[_fgrp["P1_Congestion"] == True]["Cell Name"].nunique()
+                if _n: _freq_rows.append({"Frequency": str(_freq), "Tier": "P1 (Moderate)", "Cells": _n})
+        if not _freq_rows:
+            fig_by_freq = make_empty_figure("Congestion by Frequency Band")
+        else:
+            _fdf2 = pd.DataFrame(_freq_rows)
+            fig_by_freq = px.sunburst(
+                _fdf2, path=["Tier", "Frequency"], values="Cells",
+                title="Congestion — Tier × Frequency",
+                color="Tier",
+                color_discrete_map={"P0 (Severe)": P0_COLOR, "P1 (Moderate)": P1_COLOR},
+            )
+            fig_by_freq.update_traces(textinfo="label+percent entry",
+                                      insidetextorientation="radial")
+            fig_by_freq.update_layout(**_cl())
+
+    # ---- Congestion timeseries (area) ----
     if filtered.empty or "Time" not in filtered.columns or (not has_p0 and not has_p1):
-        fig_cong_time = make_empty_figure("P0 / P1 Congestion Over Time")
+        fig_cong_time = make_empty_figure("Congestion Over Time")
     else:
         time_traces = []
         if has_p0:
@@ -653,17 +797,18 @@ def update_dashboard(
             p1t["Tier"] = "P1 (Moderate)"
             time_traces.append(p1t)
         if not time_traces:
-            fig_cong_time = make_empty_figure("P0 / P1 Congestion Over Time")
+            fig_cong_time = make_empty_figure("Congestion Over Time")
         else:
             combined = pd.concat(time_traces, ignore_index=True)
-            fig_cong_time = px.line(
+            fig_cong_time = px.area(
                 combined, x="Time", y="Congested Rows", color="Tier",
-                title="Congested Rows Over Time — P0 vs P1",
+                title="Congestion Trend — P0 vs P1",
                 color_discrete_map={"P0 (Severe)": P0_COLOR, "P1 (Moderate)": P1_COLOR},
             )
-            fig_cong_time.update_layout(template="plotly_white")
+            fig_cong_time.update_traces(opacity=0.75)
+            fig_cong_time.update_layout(**_cl())
 
-    # Top congested cells
+    # ---- Top congested cells ----
     if (filtered.empty or "Cell Name" not in filtered.columns
             or "FinalCongestionScore" not in filtered.columns):
         fig_top_cong = make_empty_figure("Top Congested Cells")
@@ -687,21 +832,25 @@ def update_dashboard(
                 top_cong = top_cong.merge(cell_tier[["Cell Name", "Tier"]],
                                           on="Cell Name", how="left")
                 top_cong["Tier"] = top_cong["Tier"].fillna("Not Congested")
-                color_arg = "Tier"
                 cmap = {"P0 (Severe)": P0_COLOR, "P1 (Moderate)": P1_COLOR,
                         "Not Congested": CONGESTION_COLORS["Not Congested"]}
+                color_arg = "Tier"
             else:
                 color_arg, cmap = None, {}
             fig_top_cong = px.bar(
                 top_cong, x="FinalCongestionScore", y="Cell Name", orientation="h",
-                title="Top 15 Cells by Final Congestion Score",
+                title="Top 15 Most Congested Cells",
                 color=color_arg,
                 color_discrete_map=cmap if cmap else None,
+                text="FinalCongestionScore",
             )
-            fig_top_cong.update_layout(template="plotly_white",
-                                       yaxis={"categoryorder": "total ascending"})
+            fig_top_cong.update_traces(texttemplate="%{text:.2f}",
+                                       textposition="outside", marker_line_width=0)
+            fig_top_cong.update_layout(**_cl(
+                yaxis={"categoryorder": "total ascending", "tickfont": {"size": 10}},
+            ))
 
-    # Busy hour distribution
+    # ---- Busy hour — polar bar (24 h clock) ----
     if filtered.empty or "BusyHour" not in filtered.columns:
         fig_busy_hour = make_empty_figure("Busy Hour Distribution")
     else:
@@ -709,24 +858,47 @@ def update_dashboard(
                    if "IsBusyHourRow" in filtered.columns else filtered.copy())
         if busy_df.empty:
             fig_busy_hour = make_empty_figure("Busy Hour Distribution")
-        elif "BusyHour_Level" in busy_df.columns:
-            hour_counts = (busy_df.groupby(["BusyHour", "BusyHour_Level"], as_index=False)
-                           .size().rename(columns={"size": "Count"}).sort_values("BusyHour"))
-            fig_busy_hour = px.bar(
-                hour_counts, x="BusyHour", y="Count", color="BusyHour_Level",
-                title="Busy Hour Distribution by Level",
-                color_discrete_map={"P0": P0_COLOR, "P1": P1_COLOR,
-                                    "Not Congested": CONGESTION_COLORS["Not Congested"]},
-            )
-            fig_busy_hour.update_layout(template="plotly_white")
         else:
-            hour_counts = (busy_df.groupby("BusyHour", as_index=False).size()
-                           .rename(columns={"size": "Count"}).sort_values("BusyHour"))
-            fig_busy_hour = px.bar(hour_counts, x="BusyHour", y="Count",
-                                   title="Busy Hour Distribution")
-            fig_busy_hour.update_layout(template="plotly_white")
+            _hours  = list(range(24))
+            _labels = [f"{h:02d}h" for h in _hours]
+            fig_busy_hour = go.Figure()
+            level_cfg = [("P0", P0_COLOR), ("P1", P1_COLOR),
+                         ("Not Congested", CONGESTION_COLORS["Not Congested"])]
+            if "BusyHour_Level" in busy_df.columns:
+                for lvl, clr in level_cfg:
+                    counts = [int(((busy_df["BusyHour"] == h) &
+                                   (busy_df["BusyHour_Level"] == lvl)).sum())
+                              for h in _hours]
+                    if any(counts):
+                        fig_busy_hour.add_trace(go.Barpolar(
+                            r=counts, theta=_labels, name=lvl,
+                            marker_color=clr, opacity=0.85,
+                        ))
+            else:
+                counts = [int((busy_df["BusyHour"] == h).sum()) for h in _hours]
+                fig_busy_hour.add_trace(go.Barpolar(
+                    r=counts, theta=_labels, marker_color="#6366f1", opacity=0.85,
+                    name="Congested rows",
+                ))
+            fig_busy_hour.update_layout(
+                title={"text": "Congestion by Hour of Day", "font": {"size": 14,
+                       "color": "#0f172a", "family": _FONT}, "x": 0.02},
+                polar={
+                    "bgcolor": "rgba(248,250,252,0.6)",
+                    "radialaxis": {"visible": True, "showticklabels": False,
+                                   "gridcolor": "#e2e8f0"},
+                    "angularaxis": {"direction": "clockwise", "rotation": 90,
+                                    "tickfont": {"size": 10, "color": "#64748b"},
+                                    "gridcolor": "#e2e8f0"},
+                },
+                paper_bgcolor="rgba(0,0,0,0)",
+                font={"family": _FONT},
+                showlegend=True,
+                legend={"orientation": "h", "y": -0.08, "font": {"size": 11}},
+                margin={"t": 50, "b": 40, "l": 20, "r": 20},
+            )
 
-    # PRB vs Throughput scatter
+    # ---- PRB vs Throughput scatter ----
     throughput_col = next(
         (c for c in ["LTE DL User Throughput", "DL Avg Throughput"] if c in filtered.columns), None)
     if filtered.empty or "DL PRB Load" not in filtered.columns or throughput_col is None:
@@ -738,28 +910,41 @@ def update_dashboard(
                 [cdf["P0_Congestion"] == True, cdf["P1_Congestion"] == True],
                 ["P0 (Severe)", "P1 (Moderate)"], default="Not Congested")
         elif has_p1:
-            cdf["CongestionFlag"] = np.where(cdf["P1_Congestion"] == True, "P1 (Moderate)", "Not Congested")
+            cdf["CongestionFlag"] = np.where(
+                cdf["P1_Congestion"] == True, "P1 (Moderate)", "Not Congested")
         elif has_p0:
-            cdf["CongestionFlag"] = np.where(cdf["P0_Congestion"] == True, "P0 (Severe)", "Not Congested")
+            cdf["CongestionFlag"] = np.where(
+                cdf["P0_Congestion"] == True, "P0 (Severe)", "Not Congested")
         else:
             cdf["CongestionFlag"] = "Not Congested"
         cdf = downsample(
-            cdf[[c for c in ["DL PRB Load", throughput_col, "Cell Name", "Time", "CongestionFlag"]
-                 if c in cdf.columns]].dropna(subset=["DL PRB Load", throughput_col]),
+            cdf[[c for c in ["DL PRB Load", throughput_col, "Cell Name",
+                             "Time", "CongestionFlag"] if c in cdf.columns]]
+            .dropna(subset=["DL PRB Load", throughput_col]),
             MAX_SCATTER_POINTS,
         )
         fig_cong_scatter = px.scatter(
             cdf, x="DL PRB Load", y=throughput_col, color="CongestionFlag",
+            opacity=0.6,
             color_discrete_map={"P0 (Severe)": P0_COLOR, "P1 (Moderate)": P1_COLOR,
                                  "Not Congested": CONGESTION_COLORS["Not Congested"]},
             hover_data=[c for c in ["Cell Name", "Time"] if c in cdf.columns],
-            title=f"{throughput_col} vs DL PRB Load — P0 / P1 Congestion",
+            title=f"{throughput_col} vs DL PRB Load",
         )
-        fig_cong_scatter.update_layout(template="plotly_white")
-        fig_cong_scatter.add_vline(x=DEFAULT_PRB_THRESHOLD, line_dash="dash",
-                                    annotation_text=f"PRB threshold {DEFAULT_PRB_THRESHOLD}")
-        fig_cong_scatter.add_hline(y=DEFAULT_THROUGHPUT_THRESHOLD, line_dash="dash",
-                                    annotation_text=f"Throughput threshold {DEFAULT_THROUGHPUT_THRESHOLD}")
+        fig_cong_scatter.update_traces(marker={"size": 4, "line": {"width": 0}})
+        fig_cong_scatter.update_layout(**_cl())
+        fig_cong_scatter.add_vline(
+            x=DEFAULT_PRB_THRESHOLD, line_dash="dot", line_color="#ef4444",
+            line_width=1.5,
+            annotation_text=f"PRB {DEFAULT_PRB_THRESHOLD}%",
+            annotation_font_color="#ef4444",
+        )
+        fig_cong_scatter.add_hline(
+            y=DEFAULT_THROUGHPUT_THRESHOLD, line_dash="dot", line_color="#f97316",
+            line_width=1.5,
+            annotation_text=f"Tput {DEFAULT_THROUGHPUT_THRESHOLD}",
+            annotation_font_color="#f97316",
+        )
 
     # Congestion table
     cong_cols = [c for c in [
@@ -785,7 +970,7 @@ def update_dashboard(
     return (
         cards, fig_time, fig_time_2, fig_time_3, fig_hist, fig_top, fig_scatter, fig_corr,
         table_data, table_columns,
-        congestion_cards, fig_cong_level, fig_cong_time, fig_top_cong, fig_busy_hour,
+        congestion_cards, fig_by_region, fig_by_freq, fig_cong_time, fig_top_cong, fig_busy_hour,
         fig_cong_scatter,
         cong_table_df.to_dict("records"),
         [{"name": c, "id": c} for c in cong_table_df.columns],

@@ -23,6 +23,9 @@ app = Dash(
     external_scripts=[
         "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"
     ],
+    external_stylesheets=[
+        "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    ],
 )
 app.title = "RAN KPI Dashboard"
 

@@ -42,45 +42,93 @@ NO_DATA_COLOR    = "#94a3b8"
 
 # ---- Cone radius — derived from Average Timing Advance (already in metres) ----
 TA_COLUMN        = "Average Timing Advance"   # KPI column name
-MIN_CONE_RANGE_M = 200.0    # floor  (very small urban cells)
-MAX_CONE_RANGE_M = 2500.0   # ceiling (large rural cells)
-DEFAULT_CONE_RANGE = 600.0  # fallback when TA is unavailable for a cell
+MIN_CONE_RANGE_M   =  40.0   # floor  (very small urban cells)
+MAX_CONE_RANGE_M   = 250.0   # ceiling — ~52 px at zoom 15
+DEFAULT_CONE_RANGE = 100.0   # fallback when TA is unavailable for a cell
 
-# ---- UI styles ----
+# ---- Approach 2: Frequency-based cone sizing ----
+# Lower frequency → longest + narrowest (far-reaching spike)
+# Higher frequency → shortest + widest  (broad close-in fan)
+# Keys: integer MHz value or the string "tdd"
+FREQ_CONE_PARAMS: dict = {
+    800:   {"range_m": 250, "half_angle": 12},
+    1800:  {"range_m": 170, "half_angle": 23},
+    2100:  {"range_m": 120, "half_angle": 34},
+    "tdd": {"range_m": 100, "half_angle": 28},
+}
+FREQ_CONE_DEFAULT: dict = {"range_m": 120, "half_angle": 30}  # unknown frequency
+
+# ── Design tokens ────────────────────────────────────────────────────────────
+ACCENT       = "#6366f1"   # indigo
+ACCENT_DARK  = "#4338ca"
+ACCENT_LIGHT = "#eef2ff"
+SURFACE      = "#ffffff"
+SURFACE_2    = "#f8fafc"
+BORDER_COLOR = "#e2e8f0"
+TEXT_PRIMARY = "#0f172a"
+TEXT_MUTED   = "#64748b"
+
+# ── Component styles ─────────────────────────────────────────────────────────
 CARD_STYLE = {
-    "padding": "14px 16px",
-    "border": "1px solid #e5e7eb",
-    "borderRadius": "14px",
-    "background": "white",
-    "boxShadow": "0 1px 3px rgba(0,0,0,0.06)",
+    "padding": "18px 20px",
+    "border": "none",
+    "borderRadius": "16px",
+    "background": SURFACE,
+    "boxShadow": "0 2px 12px rgba(0,0,0,0.07)",
 }
 SECTION_STYLE = {
-    "padding": "14px",
-    "border": "1px solid #e5e7eb",
-    "borderRadius": "16px",
-    "background": "white",
-    "boxShadow": "0 1px 3px rgba(0,0,0,0.06)",
-    "marginBottom": "16px",
+    "padding": "20px",
+    "border": "none",
+    "borderRadius": "20px",
+    "background": SURFACE,
+    "boxShadow": "0 2px 12px rgba(0,0,0,0.06)",
+    "marginBottom": "20px",
 }
 APP_STYLE = {
-    "fontFamily": "Inter, Arial, sans-serif",
-    "backgroundColor": "#f8fafc",
+    "fontFamily": "'Inter', 'Segoe UI', system-ui, Arial, sans-serif",
+    "backgroundColor": "#f1f5f9",
     "minHeight": "100vh",
-    "padding": "18px",
 }
 _PILL_BTN = {
-    "padding": "5px 14px",
+    "padding": "6px 14px",
     "borderRadius": "20px",
-    "border": "1px solid #e2e8f0",
+    "border": f"1px solid {BORDER_COLOR}",
     "fontSize": "12px",
     "cursor": "pointer",
-    "background": "white",
-    "fontFamily": "Inter, Arial, sans-serif",
+    "background": SURFACE,
+    "fontFamily": "'Inter', system-ui, sans-serif",
+    "fontWeight": 500,
+    "color": TEXT_PRIMARY,
 }
 _PRIMARY_BTN = {
     **_PILL_BTN,
-    "background": "#0f172a",
+    "background": TEXT_PRIMARY,
     "color": "white",
-    "border": "1px solid #0f172a",
+    "border": f"1px solid {TEXT_PRIMARY}",
     "fontWeight": 600,
+}
+_ACCENT_BTN = {
+    **_PILL_BTN,
+    "background": ACCENT,
+    "color": "white",
+    "border": f"1px solid {ACCENT}",
+    "fontWeight": 600,
+}
+
+_TAB_STYLE = {
+    "padding": "10px 22px",
+    "fontWeight": 500, "fontSize": "13px",
+    "color": TEXT_MUTED,
+    "border": "none",
+    "borderBottom": "2px solid transparent",
+    "background": "transparent",
+    "fontFamily": "'Inter', system-ui, sans-serif",
+}
+_TAB_SELECTED = {
+    **_TAB_STYLE,
+    "color": ACCENT,
+    "fontWeight": 700,
+    "borderBottom": f"2px solid {ACCENT}",
+    "background": SURFACE,
+    "borderRadius": "10px 10px 0 0",
 }

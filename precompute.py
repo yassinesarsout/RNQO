@@ -134,9 +134,12 @@ if not GEO_DF.empty:
     _cell_names = _geo["Cell Name"].astype(str).values
     _sites      = _geo["Radio Site"].astype(str).values
     _regions    = _geo["Region"].astype(str).values
-    _coverages  = (_geo["CoverageType"].astype(str).values
-                   if "CoverageType" in _geo.columns
-                   else np.array([""] * len(_geo)))
+    _coverages   = (_geo["CoverageType"].astype(str).values
+                    if "CoverageType" in _geo.columns
+                    else np.array([""] * len(_geo)))
+    _frequencies = (_geo["frequency"].astype(str).values
+                    if "frequency" in _geo.columns
+                    else np.array([""] * len(_geo)))
 
     # ---- Per-cell cone radius derived from Average Timing Advance ----
     # TA column is already in metres (pre-converted by the network export).
@@ -183,15 +186,16 @@ if not GEO_DF.empty:
 
             CELL_POLYGONS[_cn] = _coords
             CELL_GEO_META[_cn] = {
-                "lat":      _lat,
-                "lon":      _lon,
-                "azimuth":  float(_azs[_i]),
-                "range_m":  float(_cell_ranges[_i]),   # TA-derived radius
-                "ta_m":     _ta_per_cell.get(_cn),     # raw TA value (m), may be None
-                "site_key": _sk_list[_i],
-                "region":   _regions[_i],
-                "site":     _sites[_i],
-                "coverage": _coverages[_i],
+                "lat":       _lat,
+                "lon":       _lon,
+                "azimuth":   float(_azs[_i]),
+                "range_m":   float(_cell_ranges[_i]),   # TA-derived radius
+                "ta_m":      _ta_per_cell.get(_cn),     # raw TA value (m), may be None
+                "site_key":  _sk_list[_i],
+                "region":    _regions[_i],
+                "site":      _sites[_i],
+                "coverage":  _coverages[_i],
+                "frequency": str(_frequencies[_i]),
             }
 
 

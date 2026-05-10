@@ -4,13 +4,28 @@ Dash-Leaflet map GeoJSON builders and JavaScript style function strings.
 
 import numpy as np
 
-from config import CONGESTION_COLORS, NO_DATA_COLOR, LEVEL_ORDER, SECTOR_ZOOM_THRESHOLD
+from config import (
+    CONGESTION_COLORS, NO_DATA_COLOR, LEVEL_ORDER,
+    SECTOR_ZOOM_THRESHOLD,
+    FREQ_CONE_PARAMS, FREQ_CONE_DEFAULT,
+)
 from geo_utils import _edges_vectorized
 from precompute import CELL_POLYGONS, CELL_GEO_META, SITE_SUMMARY
 
 # Sector radius is halved for every zoom level above SECTOR_ZOOM_THRESHOLD
 # so cones shrink proportionally as you zoom in and stop overlapping.
-_SECTOR_MIN_M = 60   # floor (metres) — keeps tiny sectors clickable
+_SECTOR_MIN_M = 15   # floor (metres) — keeps tiny sectors clickable
+
+
+def _freq_lookup(freq_str: str) -> dict:
+    """Return the FREQ_CONE_PARAMS entry for a raw frequency string."""
+    s = str(freq_str).strip().lower()
+    if s in ("tdd", "td", "2600", "tdd2600"):
+        return FREQ_CONE_PARAMS["tdd"]
+    try:
+        return FREQ_CONE_PARAMS.get(int(float(s)), FREQ_CONE_DEFAULT)
+    except (ValueError, TypeError):
+        return FREQ_CONE_DEFAULT
 
 
 # ── JavaScript function references for Dash Leaflet 1.x ────────────────────
@@ -81,12 +96,23 @@ def build_sectors_geojson(
     selected_site_keys: list | None = None,
     selected_cell_names: list | None = None,
     zoom: int = SECTOR_ZOOM_THRESHOLD,
+    approach: str = "ta",
 ) -> dict:
+    """
+    approach = "ta"   → TA-derived radius, fixed half-angle (original)
+    approach = "freq" → frequency-derived radius + per-cell half-angle;
+                        800 MHz = long+narrow, 2100 MHz = short+wide, TDD = small
+    In both cases the radius is halved for every zoom level above
+    SECTOR_ZOOM_THRESHOLD so cones stay proportional on screen.
+    Smaller cones are rendered last (on top in SVG) for easier selection.
+    """
     sel_sites = set(selected_site_keys  or [])
     sel_cells = set(selected_cell_names or [])
 
-    # Collect per-cell data for vectorised computation
-    cell_names, lats, lons, azs, base_ranges = [], [], [], [], []
+    # ── Collect per-cell metadata ───────────────────────────────────────────
+    cell_names, lats, lons, azs = [], [], [], []
+    base_ranges, half_angles    = [], []
+
     for cn in visible_cells:
         if cn not in CELL_GEO_META:
             continue
@@ -95,17 +121,21 @@ def build_sectors_geojson(
         lats.append(m["lat"])
         lons.append(m["lon"])
         azs.append(m["azimuth"])
-        base_ranges.append(m["range_m"])
+
+        if approach == "freq":
+            p = _freq_lookup(m.get("frequency", ""))
+            base_ranges.append(p["range_m"])
+            half_angles.append(p["half_angle"])
+        else:
+            base_ranges.append(m["range_m"])
+            half_angles.append(None)   # uniform angle handled below
 
     if not cell_names:
         return {"type": "FeatureCollection", "features": []}
 
-    # Zoom-proportional scaling:
-    #   - At SECTOR_ZOOM_THRESHOLD the cone is full-sized.
-    #   - Each additional zoom level halves the radius so cones shrink
-    #     and stop overlapping as you zoom in.
-    #   - We never let zoom go below the threshold (avoids blowing up
-    #     the size when sectors are shown for a selected site at low zoom).
+    # ── Zoom-proportional scaling ───────────────────────────────────────────
+    # Cap effective_zoom at threshold so selected-site sectors shown at low
+    # zoom don't blow up in size.
     effective_zoom = max(SECTOR_ZOOM_THRESHOLD, int(zoom or SECTOR_ZOOM_THRESHOLD))
     scale = 2.0 ** (SECTOR_ZOOM_THRESHOLD - effective_zoom)
     scaled_ranges = np.maximum(
@@ -116,16 +146,24 @@ def build_sectors_geojson(
     lats_a = np.array(lats, dtype=float)
     lons_a = np.array(lons, dtype=float)
     azs_a  = np.array(azs,  dtype=float)
-    edge_lats, edge_lons = _edges_vectorized(lats_a, lons_a, azs_a, scaled_ranges)
 
-    items = []   # (scaled_range_m, feature_dict) — sorted for z-order
+    # ── Compute arc edge points ─────────────────────────────────────────────
+    if approach == "freq":
+        ha_arr = np.array(half_angles, dtype=float)
+        edge_lats, edge_lons = _edges_vectorized(
+            lats_a, lons_a, azs_a, scaled_ranges, half_angle=ha_arr
+        )
+    else:
+        edge_lats, edge_lons = _edges_vectorized(lats_a, lons_a, azs_a, scaled_ranges)
+
+    # ── Build feature list ──────────────────────────────────────────────────
+    items = []   # (scaled_range_m, feature_dict)
     for i, cn in enumerate(cell_names):
         meta  = CELL_GEO_META[cn]
         level = cong_lookup.get(cn)
         color = CONGESTION_COLORS.get(level, NO_DATA_COLOR) if level else NO_DATA_COLOR
         sr    = float(scaled_ranges[i])
 
-        # Closed GeoJSON polygon ring: center → arc points → center
         center = [lons_a[i], lats_a[i]]
         arc    = [[float(edge_lons[i, j]), float(edge_lats[i, j])]
                   for j in range(edge_lons.shape[1])]
@@ -141,6 +179,7 @@ def build_sectors_geojson(
                 "region":    meta["region"],
                 "azimuth":   round(meta["azimuth"], 1),
                 "range_m":   int(meta["range_m"]),
+                "frequency": meta.get("frequency", ""),
                 "coverage":  meta["coverage"],
                 "congestion": level or "No Data",
                 "color":      color,
@@ -148,8 +187,7 @@ def build_sectors_geojson(
             },
         }))
 
-    # Render largest cones first so smaller cones sit on top in SVG —
-    # this lets you click a narrow cell even when it overlaps a big one.
+    # Largest cones first → smallest rendered last → smallest sits on top in SVG
     items.sort(key=lambda x: x[0], reverse=True)
     return {"type": "FeatureCollection", "features": [f for _, f in items]}
 

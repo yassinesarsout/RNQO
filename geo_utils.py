@@ -27,9 +27,11 @@ def normalize_level(level) -> str:
 def _edges_vectorized(lats, lons, azimuths, ranges_m,
                       half_angle=FIXED_HALF_ANGLE, n_points=CONE_POINTS):
     """
-    Vectorized sector-edge computation with per-cell ranges.
+    Vectorized sector-edge computation with per-cell ranges and optional
+    per-cell half-angles.
     Returns (edge_lats, edge_lons) each shaped (n_cells, n_points+1).
-    ranges_m must be an array of length n_cells.
+    half_angle may be a scalar (same for all cells) or a 1-D array of
+    length n_cells for per-cell angles (used by the frequency approach).
     """
     earth_r  = 6_371_000.0
     lats     = np.asarray(lats,     dtype=float)
@@ -37,8 +39,16 @@ def _edges_vectorized(lats, lons, azimuths, ranges_m,
     azimuths = np.asarray(azimuths, dtype=float)
     ranges_m = np.asarray(ranges_m, dtype=float)
 
-    offsets  = np.linspace(-half_angle, half_angle, n_points + 1)
-    bearings = np.radians(azimuths[:, None] + offsets[None, :])
+    ha = np.asarray(half_angle, dtype=float)
+    if ha.ndim == 0:
+        # scalar — uniform angle across all cells (original behaviour)
+        offsets  = np.linspace(-float(ha), float(ha), n_points + 1)
+        bearings = np.radians(azimuths[:, None] + offsets[None, :])
+    else:
+        # per-cell array — interpolate from -ha[i] to +ha[i] for each cell
+        t        = np.linspace(0.0, 1.0, n_points + 1)                   # (n_pts+1,)
+        offsets  = -ha[:, None] + 2.0 * ha[:, None] * t[None, :]         # (n_cells, n_pts+1)
+        bearings = np.radians(azimuths[:, None] + offsets)                # (n_cells, n_pts+1)
     lat_rad  = np.radians(lats)[:, None]
     lon_rad  = np.radians(lons)[:, None]
     d_over_r = (ranges_m / earth_r)[:, None]
