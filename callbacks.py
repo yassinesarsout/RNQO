@@ -174,20 +174,51 @@ def update_site_and_cell_options(selected_regions, selected_sites):
     Input("selected-cells-store",   "data"),
     Input("animation-hour-store",   "data"),
     Input("map-congestion-filter",  "value"),
+    Input("map-freq-filter",        "value"),
+    Input("map-kpi-overlay",        "value"),
 )
 def update_map_sites(
     regions, sites, cells, modes, start, end,
-    sel_sites, sel_cells, animation_hour, congestion_filter,
+    sel_sites, sel_cells, animation_hour,
+    congestion_filter, freq_filter, kpi_overlay,
 ):
     visible  = get_geo_visible_cells(regions, sites, cells)
     cong     = get_cell_congestion_lookup(regions, sites, cells, modes, start, end, animation_hour)
     filtered = get_filtered_df(regions, sites, cells, modes, start, end)
 
+    # ── Frequency band filter ──────────────────────────────────────────
+    if freq_filter and freq_filter != "all":
+        fkey = freq_filter.lower()
+        visible = frozenset(
+            cn for cn in visible
+            if str(CELL_GEO_META.get(cn, {}).get("frequency", "")).lower().startswith(fkey)
+        )
+
+    # ── Congestion tier filter ─────────────────────────────────────────
     if congestion_filter in ("p0", "p1"):
         target  = "P0" if congestion_filter == "p0" else "P1"
         visible = frozenset(cn for cn in visible if cong.get(cn) == target)
 
-    sites_geojson = build_sites_geojson(visible, cong, sel_sites, sel_cells)
+    # ── KPI overlay: compute per-site average ──────────────────────────
+    site_kpi_lookup = None
+    if kpi_overlay and kpi_overlay != "__congestion__" and kpi_overlay in (filtered.columns if not filtered.empty else []):
+        if "Cell Name" in filtered.columns and "Radio Site" in filtered.columns:
+            kpi_by_site = (
+                filtered.groupby("Radio Site", as_index=False)[kpi_overlay].mean()
+            )
+            # Map Radio Site name → site_key via SITE_SUMMARY
+            if not SITE_SUMMARY.empty:
+                sk_map = {row["site_name"]: row["SiteKey"]
+                          for _, row in SITE_SUMMARY.iterrows()}
+                site_kpi_lookup = {
+                    sk_map[r["Radio Site"]]: r[kpi_overlay]
+                    for _, r in kpi_by_site.iterrows()
+                    if r["Radio Site"] in sk_map
+                }
+
+    sites_geojson = build_sites_geojson(
+        visible, cong, sel_sites, sel_cells, site_kpi_lookup=site_kpi_lookup
+    )
 
     # Build a lightweight site_df for the panel
     if not SITE_SUMMARY.empty:
@@ -229,10 +260,12 @@ def update_map_sites(
     Input("map-zoom-store",         "data"),
     Input("sector-approach-store",  "data"),
     Input("map-congestion-filter",  "value"),
+    Input("map-freq-filter",        "value"),
 )
 def update_map_sectors(
     regions, sites, cells, modes, start, end,
-    sel_sites, sel_cells, animation_hour, zoom, approach, congestion_filter,
+    sel_sites, sel_cells, animation_hour, zoom, approach,
+    congestion_filter, freq_filter,
 ):
     current_zoom   = zoom or 8
     show_all       = current_zoom >= SECTOR_ZOOM_THRESHOLD
@@ -243,6 +276,13 @@ def update_map_sectors(
 
     visible  = get_geo_visible_cells(regions, sites, cells)
     cong     = get_cell_congestion_lookup(regions, sites, cells, modes, start, end, animation_hour)
+
+    if freq_filter and freq_filter != "all":
+        fkey    = freq_filter.lower()
+        visible = frozenset(
+            cn for cn in visible
+            if str(CELL_GEO_META.get(cn, {}).get("frequency", "")).lower().startswith(fkey)
+        )
 
     if congestion_filter in ("p0", "p1"):
         target  = "P0" if congestion_filter == "p0" else "P1"

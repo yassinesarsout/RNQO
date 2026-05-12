@@ -333,6 +333,62 @@ def build_forecast_tab():
             ], style={"display": "flex", "gap": "16px",
                       "flexWrap": "wrap", "marginBottom": "16px"}),
 
+            # ── Weekly risk calendar ─────────────────────────────────────────
+            html.Div([
+                html.H4("📅  Weekly Risk Calendar  (Hour of Day × Day of Week)",
+                        style={"margin": "0 0 4px 0", "fontSize": "14px",
+                               "color": "#0f172a"}),
+                html.P("Predicted DL PRB Load averaged over all selected cells. "
+                       "Dark red = P0 risk · Orange = P1 · Green = clear. "
+                       "Requires a ≥ 168 h (1-week) horizon.",
+                       style={"fontSize": "11px", "color": "#64748b",
+                              "margin": "0 0 8px 0"}),
+                dcc.Loading(
+                    type="cube", color=_ACCENT,
+                    children=dcc.Graph(id="fc-weekly-calendar",
+                                       config={"displayModeBar": False}),
+                ),
+            ], style=_SECTION),
+
+            # ── What-if traffic growth simulator ────────────────────────────
+            html.Div([
+                html.H4("⚡  What-If: Traffic Growth Simulator",
+                        style={"margin": "0 0 4px 0", "fontSize": "14px",
+                               "color": "#0f172a"}),
+                html.P("Scale the forecasted DL PRB Load by a growth multiplier "
+                       "and see how many cells would breach the P0 threshold.",
+                       style={"fontSize": "11px", "color": "#64748b",
+                              "margin": "0 0 12px 0"}),
+                html.Div([
+                    html.Div([
+                        html.Label("Traffic Growth Multiplier",
+                                   style={"fontSize": "12px", "fontWeight": 600,
+                                          "color": "#374151", "marginBottom": "6px",
+                                          "display": "block"}),
+                        dcc.Slider(
+                            id="fc-growth-slider",
+                            min=1.0, max=3.0, step=0.1, value=1.0,
+                            marks={1: "×1 (current)", 1.5: "×1.5",
+                                   2: "×2",           2.5: "×2.5",   3: "×3"},
+                            tooltip={"placement": "bottom", "always_visible": True},
+                        ),
+                    ], style={"flex": 2}),
+                    html.Div(
+                        id="fc-whatif-output",
+                        style={"flex": 1, "padding": "10px 16px",
+                               "background": "#f8fafc", "borderRadius": "12px",
+                               "border": "1px solid #e2e8f0",
+                               "fontSize": "13px", "minHeight": "60px"},
+                    ),
+                ], style={"display": "flex", "gap": "20px",
+                          "alignItems": "center", "flexWrap": "wrap"}),
+                dcc.Loading(
+                    type="dot", color=_WARN,
+                    children=dcc.Graph(id="fc-whatif-chart",
+                                       config={"displayModeBar": False}),
+                ),
+            ], style=_SECTION),
+
             # ── Congestion alert table ───────────────────────────────────────
             html.Div([
                 html.Div([
@@ -370,7 +426,7 @@ def build_forecast_tab():
                 ),
             ], style=_SECTION),
 
-            # ── Hidden store ─────────────────────────────────────────────────
+            # ── Hidden stores ─────────────────────────────────────────────────
             dcc.Store(id="fc-forecast-store", data={}),
 
         ], style={"padding": "4px 0"})

@@ -434,7 +434,7 @@ def _tab_geometry_map():
 
                 # Congestion filter
                 html.Div([
-                    html.Span("Show:",
+                    html.Span("Tier:",
                               style={"fontSize": "11px", "color": TEXT_MUTED,
                                      "fontWeight": 600, "whiteSpace": "nowrap"}),
                     dcc.RadioItems(
@@ -446,8 +446,48 @@ def _tab_geometry_map():
                         ],
                         value="all", inline=True,
                         inputStyle={"marginRight": "3px"},
-                        labelStyle={"marginRight": "10px", "fontSize": "11px",
+                        labelStyle={"marginRight": "8px", "fontSize": "11px",
                                     "cursor": "pointer"},
+                    ),
+                ], style={"display": "flex", "alignItems": "center", "gap": "6px"}),
+
+                # Frequency band filter
+                html.Div([
+                    html.Span("Band:",
+                              style={"fontSize": "11px", "color": TEXT_MUTED,
+                                     "fontWeight": 600, "whiteSpace": "nowrap"}),
+                    dcc.RadioItems(
+                        id="map-freq-filter",
+                        options=[
+                            {"label": " All",  "value": "all"},
+                            {"label": " 800",  "value": "800"},
+                            {"label": " 1800", "value": "1800"},
+                            {"label": " 2100", "value": "2100"},
+                            {"label": " TDD",  "value": "tdd"},
+                        ],
+                        value="all", inline=True,
+                        inputStyle={"marginRight": "3px"},
+                        labelStyle={"marginRight": "8px", "fontSize": "11px",
+                                    "cursor": "pointer"},
+                    ),
+                ], style={"display": "flex", "alignItems": "center", "gap": "6px"}),
+
+                # KPI traffic overlay
+                html.Div([
+                    html.Span("Color by:",
+                              style={"fontSize": "11px", "color": TEXT_MUTED,
+                                     "fontWeight": 600, "whiteSpace": "nowrap"}),
+                    dcc.Dropdown(
+                        id="map-kpi-overlay",
+                        options=[
+                            {"label": "Congestion tier",      "value": "__congestion__"},
+                            {"label": "DL PRB Load (%)",      "value": "DL PRB Load"},
+                            {"label": "Active Users",         "value": "Active Users"},
+                            {"label": "DL Throughput (kbps)", "value": "LTE DL User Throughput"},
+                        ],
+                        value="__congestion__",
+                        clearable=False,
+                        style={"fontSize": "11px", "minWidth": "170px"},
                     ),
                 ], style={"display": "flex", "alignItems": "center", "gap": "6px"}),
 

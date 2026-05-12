@@ -960,3 +960,179 @@ def refresh_cache(n_clicks, prb_thr, usr_thr):
     fc_df.to_csv(_CACHE_PATH, index=False)
     ts = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
     return f"✓ Cached {len(all_cells)} cells · {ts}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Weekly Risk Calendar
+# ─────────────────────────────────────────────────────────────────────────────
+_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+@callback(
+    Output("fc-weekly-calendar", "figure"),
+    Input("fc-forecast-store", "data"),
+)
+def update_weekly_calendar(store: dict):
+    if not store or "records" not in store:
+        fig = go.Figure()
+        fig.update_layout(
+            title="Run a ≥ 168 h forecast to see the weekly calendar",
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font={"family": "Inter, sans-serif"},
+        )
+        return fig
+
+    df = pd.DataFrame(store["records"])
+    if "Time" not in df.columns or "DL PRB Load" not in df.columns:
+        return go.Figure()
+
+    df["Time"]     = pd.to_datetime(df["Time"])
+    df["Hour"]     = df["Time"].dt.hour
+    df["DayOfWk"]  = df["Time"].dt.dayofweek   # 0=Mon … 6=Sun
+    df["Day"]      = df["DayOfWk"].map(dict(enumerate(_DAY_NAMES)))
+
+    pivot = (
+        df.groupby(["Hour", "Day"])["DL PRB Load"]
+        .mean()
+        .unstack("Day")
+        .reindex(columns=_DAY_NAMES)
+        .fillna(0)
+    )
+
+    prb_threshold = store.get("prb_threshold", 90)
+
+    fig = go.Figure(go.Heatmap(
+        z=pivot.values,
+        x=_DAY_NAMES,
+        y=[f"{h:02d}h" for h in pivot.index],
+        colorscale=[
+            [0.0,  "#22c55e"],
+            [0.5,  "#fbbf24"],
+            [0.75, "#f97316"],
+            [1.0,  "#ef4444"],
+        ],
+        zmin=0,
+        zmax=100,
+        colorbar={"title": "Avg PRB %", "thickness": 14,
+                  "tickfont": {"size": 10}},
+        hovertemplate="<b>%{x} %{y}</b><br>Avg PRB: %{z:.1f}%<extra></extra>",
+    ))
+
+    # Threshold contour line annotation
+    fig.update_layout(
+        title={"text": "Weekly Risk Calendar — Avg Predicted DL PRB Load",
+               "font": {"size": 14, "color": "#0f172a", "family": "Inter, sans-serif"},
+               "x": 0.02},
+        xaxis={"title": "Day of Week"},
+        yaxis={"title": "Hour of Day", "autorange": "reversed"},
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": "Inter, sans-serif", "size": 11},
+        margin={"t": 48, "b": 40, "l": 60, "r": 20},
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What-if Traffic Growth Simulator
+# ─────────────────────────────────────────────────────────────────────────────
+
+@callback(
+    Output("fc-whatif-output", "children"),
+    Output("fc-whatif-chart",  "figure"),
+    Input("fc-growth-slider",  "value"),
+    Input("fc-forecast-store", "data"),
+)
+def update_whatif(multiplier: float, store: dict):
+    empty_fig = go.Figure()
+    empty_fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",
+                            plot_bgcolor="rgba(0,0,0,0)",
+                            font={"family": "Inter, sans-serif"})
+
+    if not store or "records" not in store:
+        return "Run a forecast first.", empty_fig
+
+    df = pd.DataFrame(store["records"])
+    if "DL PRB Load" not in df.columns:
+        return "No PRB data in forecast.", empty_fig
+
+    mult          = float(multiplier or 1.0)
+    prb_threshold = float(store.get("prb_threshold", 90))
+    df["ScaledPRB"] = (df["DL PRB Load"].fillna(0) * mult).clip(0, 100)
+
+    # Per-cell summary
+    cell_summary = (
+        df.groupby("Cell Name")
+        .agg(
+            BaseMax=("DL PRB Load",  "max"),
+            ScaledMax=("ScaledPRB",  "max"),
+            ScaledMean=("ScaledPRB", "mean"),
+        )
+        .reset_index()
+    )
+    cell_summary["Risk"] = cell_summary["ScaledMax"].apply(
+        lambda v: "P0 ⚠" if v >= prb_threshold
+                  else ("P1" if v >= prb_threshold * 0.75 else "✓ Clear")
+    )
+
+    n_p0  = (cell_summary["Risk"] == "P0 ⚠").sum()
+    n_p1  = (cell_summary["Risk"] == "P1").sum()
+    n_ok  = (cell_summary["Risk"] == "✓ Clear").sum()
+    total = len(cell_summary)
+
+    summary_children = [
+        html.Div(f"×{mult:.1f} traffic growth", style={"fontWeight": 700,
+                                                         "marginBottom": "6px",
+                                                         "color": "#0f172a"}),
+        html.Div([
+            html.Span(f"🔴 P0: {n_p0}/{total}",
+                      style={"color": "#ef4444", "fontWeight": 600,
+                             "marginRight": "14px"}),
+            html.Span(f"🟠 P1: {n_p1}/{total}",
+                      style={"color": "#f97316", "fontWeight": 600,
+                             "marginRight": "14px"}),
+            html.Span(f"✅ Clear: {n_ok}/{total}",
+                      style={"color": "#22c55e", "fontWeight": 600}),
+        ]),
+    ]
+
+    # Bar chart — scaled max PRB per cell with threshold line
+    cell_summary = cell_summary.sort_values("ScaledMax", ascending=False).head(20)
+    color_map    = {"P0 ⚠": "#ef4444", "P1": "#f97316", "✓ Clear": "#22c55e"}
+    colors       = cell_summary["Risk"].map(color_map).fillna("#94a3b8").tolist()
+
+    fig = go.Figure()
+    fig.add_bar(
+        y=cell_summary["Cell Name"],
+        x=cell_summary["ScaledMax"],
+        orientation="h",
+        marker_color=colors,
+        name=f"PRB @ ×{mult:.1f}",
+        hovertemplate="<b>%{y}</b><br>Scaled max PRB: %{x:.1f}%<extra></extra>",
+    )
+    if mult != 1.0:
+        fig.add_bar(
+            y=cell_summary["Cell Name"],
+            x=cell_summary["BaseMax"],
+            orientation="h",
+            marker_color="rgba(99,102,241,0.3)",
+            name="Base (×1)",
+            hovertemplate="<b>%{y}</b><br>Base max PRB: %{x:.1f}%<extra></extra>",
+        )
+    fig.add_vline(x=prb_threshold, line_dash="dot", line_color="#ef4444",
+                  line_width=1.5,
+                  annotation_text=f"P0 threshold {prb_threshold}%",
+                  annotation_font_color="#ef4444")
+    fig.update_layout(
+        title={"text": f"Top 20 Cells — Predicted Max PRB at ×{mult:.1f} Traffic",
+               "font": {"size": 13, "color": "#0f172a", "family": "Inter, sans-serif"},
+               "x": 0.01},
+        barmode="overlay",
+        xaxis={"title": "DL PRB Load (%)", "range": [0, 105]},
+        yaxis={"categoryorder": "total ascending", "tickfont": {"size": 10}},
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": "Inter, sans-serif", "size": 11},
+        legend={"orientation": "h", "y": -0.15},
+        margin={"t": 44, "b": 40, "l": 10, "r": 10},
+    )
+    return summary_children, fig

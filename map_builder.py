@@ -52,24 +52,54 @@ def _site_color(site_cells: list, cong_lookup: dict) -> tuple[str, str]:
 
 # ── GeoJSON builders ────────────────────────────────────────────────────────
 
+def _kpi_to_color(norm: float) -> str:
+    """Map a 0–1 normalised KPI value to a blue→yellow→red colour string."""
+    if norm <= 0.33:
+        r, g, b = int(norm * 3 * 200), int(norm * 3 * 180 + 60), 220
+    elif norm <= 0.66:
+        t = (norm - 0.33) / 0.33
+        r, g, b = int(200 + t * 55), int(240 - t * 90), int(220 - t * 220)
+    else:
+        t = (norm - 0.66) / 0.34
+        r, g, b = 255, int(150 - t * 150), 0
+    return f"#{min(r,255):02x}{min(g,255):02x}{min(b,255):02x}"
+
+
 def build_sites_geojson(
     visible_cells: frozenset,
     cong_lookup: dict,
     selected_site_keys: list | None = None,
     selected_cell_names: list | None = None,
+    site_kpi_lookup: dict | None = None,   # {site_key: float} for KPI overlay
 ) -> dict:
     if SITE_SUMMARY.empty:
         return {"type": "FeatureCollection", "features": []}
 
-    sel_sites = set(selected_site_keys  or [])
-    features  = []
+    sel_sites = set(selected_site_keys or [])
 
+    # Pre-normalise KPI values for colour mapping
+    use_kpi = bool(site_kpi_lookup)
+    if use_kpi:
+        vals = [v for v in site_kpi_lookup.values() if v is not None]
+        kpi_min = min(vals) if vals else 0.0
+        kpi_max = max(vals) if vals else 1.0
+        kpi_rng = kpi_max - kpi_min or 1.0
+
+    features = []
     for _, row in SITE_SUMMARY.iterrows():
         sk         = row["SiteKey"]
         site_cells = [c for c in row["cells"] if c in visible_cells]
         if not site_cells:
             continue
-        congestion, color = _site_color(site_cells, cong_lookup)
+
+        if use_kpi and sk in site_kpi_lookup:
+            kpi_val  = site_kpi_lookup[sk]
+            norm     = (kpi_val - kpi_min) / kpi_rng if kpi_val is not None else 0.5
+            color    = _kpi_to_color(max(0.0, min(1.0, norm)))
+            cong_lbl = f"{kpi_val:.1f}" if kpi_val is not None else "N/A"
+        else:
+            cong_lbl, color = _site_color(site_cells, cong_lookup)
+
         features.append({
             "type": "Feature",
             "geometry": {
@@ -81,7 +111,7 @@ def build_sites_geojson(
                 "site_name":  row["site_name"],
                 "region":     row["region"],
                 "cell_count": len(site_cells),
-                "congestion": congestion,
+                "congestion": cong_lbl,
                 "color":      color,
                 "selected":   sk in sel_sites,
             },
