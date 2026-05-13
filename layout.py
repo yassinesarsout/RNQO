@@ -685,6 +685,22 @@ def _tab_settings():
                               "marginBottom": "20px"}),
                 ]),
 
+                # Mode selector
+                html.Div([
+                    html.Label("Mode", style=_LBL),
+                    dcc.RadioItems(
+                        id="recompute-mode",
+                        options=[
+                            {"label": " Replace all (full recompute)", "value": "replace"},
+                            {"label": " Append new data only",         "value": "append"},
+                        ],
+                        value="replace",
+                        inputStyle={"marginRight": "6px"},
+                        labelStyle={"marginRight": "20px", "fontSize": "13px",
+                                    "color": TEXT_PRIMARY},
+                    ),
+                ], style={"marginBottom": "16px"}),
+
                 # Raw file path + button
                 html.Div([
                     html.Div([

@@ -62,6 +62,45 @@ def _max_consecutive_days(date_series: pd.Series) -> int:
 
 # ── Core engine ───────────────────────────────────────────────────────────────
 
+def _compute_summary_from_busy(busy_df: pd.DataFrame) -> pd.DataFrame:
+    """Derive cell_summary from the busy_hours DataFrame (full or partial)."""
+    cell_day = busy_df[[COL_CELL, "Date", "BusyHour_Score_0_1", "BusyHour_Score",
+                         "BusyHour_P0", "BusyHour_P1"]].copy()
+    summary = (
+        cell_day.groupby(COL_CELL, as_index=False).agg(
+            DaysObserved       =("Date",               "nunique"),
+            DaysP0             =("BusyHour_P0",        "sum"),
+            DaysP1             =("BusyHour_P1",        "sum"),
+            AvgBusyHourScore01 =("BusyHour_Score_0_1", "mean"),
+            AvgBusyHourScore   =("BusyHour_Score",     "mean"),
+            MaxBusyHourScore   =("BusyHour_Score",     "max"),
+        )
+    )
+    summary["PersistenceRatio"] = (
+        (summary["DaysP0"] + summary["DaysP1"]) / summary["DaysObserved"]
+    )
+    summary["FinalCongestionScore01"] = (
+        0.7 * summary["AvgBusyHourScore01"] + 0.3 * summary["PersistenceRatio"]
+    )
+    summary["FinalCongestionScore"] = (100 * summary["FinalCongestionScore01"]).round(2)
+
+    streaks = [
+        (cell, _max_consecutive_days(
+            grp.loc[(grp["BusyHour_P0"]) | (grp["BusyHour_P1"]), "Date"]
+        ))
+        for cell, grp in cell_day.groupby(COL_CELL)
+    ]
+    summary = summary.merge(
+        pd.DataFrame(streaks, columns=[COL_CELL, "MaxConsecutiveCongestedDays"]),
+        on=COL_CELL, how="left",
+    )
+    summary["CongestionLevel"] = summary.apply(
+        lambda r: "P0" if r["DaysP0"] > 0 else ("P1" if r["DaysP1"] > 0 else "None"),
+        axis=1,
+    )
+    return summary
+
+
 def compute_congestion(
     df: pd.DataFrame,
     thresholds: dict | None = None,
@@ -135,42 +174,7 @@ def compute_congestion(
     busy["BusyHour_P1"]    = busy["P1_Congestion"]
 
     # ── Cell summary ──────────────────────────────────────────────────────────
-    cell_day = busy[[COL_CELL, "Date", "BusyHour_Score_0_1", "BusyHour_Score",
-                     "BusyHour_P0", "BusyHour_P1"]].copy()
-
-    summary = (
-        cell_day.groupby(COL_CELL, as_index=False).agg(
-            DaysObserved         =("Date",               "nunique"),
-            DaysP0               =("BusyHour_P0",        "sum"),
-            DaysP1               =("BusyHour_P1",        "sum"),
-            AvgBusyHourScore01   =("BusyHour_Score_0_1", "mean"),
-            AvgBusyHourScore     =("BusyHour_Score",     "mean"),
-            MaxBusyHourScore     =("BusyHour_Score",     "max"),
-        )
-    )
-    summary["PersistenceRatio"] = (
-        (summary["DaysP0"] + summary["DaysP1"]) / summary["DaysObserved"]
-    )
-    summary["FinalCongestionScore01"] = (
-        0.7 * summary["AvgBusyHourScore01"] + 0.3 * summary["PersistenceRatio"]
-    )
-    summary["FinalCongestionScore"] = (100 * summary["FinalCongestionScore01"]).round(2)
-
-    # Consecutive congested days
-    streaks = [
-        (cell, _max_consecutive_days(
-            grp.loc[(grp["BusyHour_P0"]) | (grp["BusyHour_P1"]), "Date"]
-        ))
-        for cell, grp in cell_day.groupby(COL_CELL)
-    ]
-    summary = summary.merge(
-        pd.DataFrame(streaks, columns=[COL_CELL, "MaxConsecutiveCongestedDays"]),
-        on=COL_CELL, how="left",
-    )
-    summary["CongestionLevel"] = summary.apply(
-        lambda r: "P0" if r["DaysP0"] > 0 else ("P1" if r["DaysP1"] > 0 else "None"),
-        axis=1,
-    )
+    summary = _compute_summary_from_busy(busy)
 
     # ── Merge busy-hour columns back to hourly rows ───────────────────────────
     df = df.merge(
@@ -197,8 +201,15 @@ def run_and_save(
     output_busy:    str = "datasets/busy_hours_by_cell_day.csv",
     output_summary: str = "datasets/cell_congestion_summary.csv",
     thresholds: dict | None = None,
+    mode: str = "replace",
 ) -> str:
-    """Compute and persist all three outputs. Returns a human-readable status string."""
+    """Compute and persist all three outputs. Returns a human-readable status string.
+
+    mode="replace" : full recompute, overwrites all three files.
+    mode="append"  : only processes rows newer than the latest Time already saved,
+                     appends to kpi and busy_hours CSVs, then rewrites cell_summary
+                     from the full busy_hours so aggregates stay accurate.
+    """
     p = Path(raw_path)
     if not p.exists():
         return f"❌  Raw file not found: {raw_path}"
@@ -214,6 +225,53 @@ def run_and_save(
     if missing:
         return f"❌  Missing columns: {missing}"
 
+    # ── Append path ───────────────────────────────────────────────────────────
+    if mode == "append":
+        kpi_path = Path(output_kpi)
+        if not kpi_path.exists():
+            # Nothing to append to — fall back to replace and warn
+            mode = "replace"
+        else:
+            try:
+                existing = pd.read_csv(kpi_path, usecols=[COL_TIME], low_memory=False)
+                max_t = pd.to_datetime(existing[COL_TIME], errors="coerce").max()
+            except Exception as exc:
+                return f"❌  Could not read existing file to find cutoff: {exc}"
+
+            df[COL_TIME] = pd.to_datetime(df[COL_TIME], errors="coerce")
+            new_raw = df[df[COL_TIME] > max_t].copy()
+
+            if new_raw.empty:
+                return f"ℹ️  No new data found after {max_t} — nothing appended."
+
+            try:
+                result = compute_congestion(new_raw, thresholds)
+
+                for path_str, key in [
+                    (output_kpi,  "kpi_df"),
+                    (output_busy, "busy_hours"),
+                ]:
+                    path_obj = Path(path_str)
+                    path_obj.parent.mkdir(parents=True, exist_ok=True)
+                    result[key].to_csv(path_str, mode="a", header=False, index=False)
+
+                # Recompute summary from the FULL busy_hours so aggregates stay accurate
+                full_busy = pd.read_csv(output_busy, low_memory=False)
+                new_summary = _compute_summary_from_busy(full_busy)
+                Path(output_summary).parent.mkdir(parents=True, exist_ok=True)
+                new_summary.to_csv(output_summary, index=False)
+
+                n    = len(result["kpi_df"])
+                dmin = result["kpi_df"][COL_TIME].min()
+                dmax = result["kpi_df"][COL_TIME].max()
+                return (
+                    f"✅  Appended {n:,} new rows "
+                    f"({str(dmin)[:10]} → {str(dmax)[:10]}) → {output_kpi}"
+                )
+            except Exception as exc:
+                return f"❌  Append failed: {exc}"
+
+    # ── Replace path (default) ────────────────────────────────────────────────
     try:
         result = compute_congestion(df, thresholds)
         for path, key in [

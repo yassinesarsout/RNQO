@@ -120,11 +120,13 @@ def toggle_sector_approach(_, current):
     State("thr-p0_users", "value"),
     State("thr-p1_prb",   "value"),  State("thr-p1_thp",   "value"),
     State("thr-p1_users", "value"),
+    State("recompute-mode", "value"),
     prevent_initial_call=True,
 )
 def recompute_congestion(n_clicks, raw_path,
                          p0_prb, p0_thp, p0_users,
-                         p1_prb, p1_thp, p1_users):
+                         p1_prb, p1_thp, p1_users,
+                         mode):
     if not n_clicks:
         raise PreventUpdate
     def _f(v, d): return float(v) if v is not None else d
@@ -135,7 +137,7 @@ def recompute_congestion(n_clicks, raw_path,
         "p1_users": _f(p1_users, 4),
     }
     path   = (raw_path or _RAW_DATA_PATH).strip()
-    status = _cong_run_and_save(path, thresholds=thresholds)
+    status = _cong_run_and_save(path, thresholds=thresholds, mode=mode or "replace")
     if status.startswith("✅"):
         _df_filter_cache.clear()
     return status
