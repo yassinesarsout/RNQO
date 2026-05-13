@@ -2,17 +2,17 @@
 Forecast tab callbacks — AI-powered forecasting for RAN KPIs.
 
 Forecasting engine:
-  1. Tries to load Keras models + sklearn scalers from  ../my training code/
-  2. If a model + scaler pair is found  → uses the neural network prediction.
+  1. Tries to load XGBoost models + sklearn scalers from  Models/
+     (trained by Models/train_xgboost.py).
+  2. If a model + scaler pair is found  → uses XGBoost with the full
+     22-feature vector (identity codes, 9 lags, rolling mean, time features,
+     FDD/TDD dummies) matching the training notebooks exactly.
   3. For any missing model             → falls back to lag-blending
      (average of T-24h, T-168h, T-336h from historical data).
-  4. Final value = (model_pred + lag_24h + lag_1w + lag_2w) / N_available
-     — same blending strategy used during training evaluation.
 
-Congestion detection:
-  P0 → forecasted DL PRB Load  ≥  prb_threshold  (default 90 %)
-  P1 → forecasted Active Users ≥  users_threshold  OR
-        forecasted DL PRB Load  ≥  prb_threshold × 0.75
+Congestion detection (3-KPI AND logic, matches congestion_engine.py):
+  P0 → PRB > p0_prb  AND  Throughput < p0_thp  AND  Users > p0_users
+  P1 → PRB > p1_prb  AND  Throughput < p1_thp  AND  Users > p1_users
 """
 
 import os
@@ -34,82 +34,83 @@ from config import (
 )
 from precompute import DF
 
-# ── paths ───────────────────────────────────────────────────────────────────
-_MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "my training code")
-
-_MODELS: dict   = {}   # kpi → keras model  (loaded once)
-_SCALERS: dict  = {}   # kpi → sklearn scaler
-
-_KPI_FILES = {
-    "DL PRB Load":           ("prb_model",          "prb_scaler"),
-    "Active Users":          ("active_users_model",  "active_users_scaler"),
-    "LTE DL User Throughput":("throughput_model",    "throughput_scaler"),
-}
-
-_FEATURES = {
-    "DL PRB Load": [
-        "cell_id", "Active Users", "LTE DL User Throughput",
-        "prb_lag", "throughput_lag", "users_lag",
-    ],
-    "Active Users": [
-        "cell_id", "LTE DL User Throughput", "DL PRB Load",
-        "users_lag", "throughput_lag", "prb_lag",
-    ],
-    "LTE DL User Throughput": [
-        "cell_id", "DL PRB Load", "Active Users",
-        "throughput_lag", "prb_lag", "users_lag",
-    ],
-}
-
-_LAG_H = 24 * 14   # 336 h
-
 _ACCENT  = "#6366f1"
 _SUCCESS = "#22c55e"
 _WARN    = "#f97316"
 _DANGER  = "#ef4444"
 
-# ── cell_id lookup (mirrors training encoding) ───────────────────────────────
-_CELL_IDS: dict = {}
-if not DF.empty and "Cell Name" in DF.columns:
-    _cats = pd.Categorical(DF["Cell Name"])
-    _CELL_IDS = dict(zip(_cats.categories, range(len(_cats.categories))))
+# ── XGBoost model directory ───────────────────────────────────────────────────
+_XGB_DIR = os.path.join(os.path.dirname(__file__), "Models")
 
-# ── FDD/TDD dummy column names ────────────────────────────────────────────────
-_FDD_COLS: list = []
-if not DF.empty and "Cell FDD TDD Indication" in DF.columns:
-    _FDD_COLS = [
-        f"Cell FDD TDD Indication_{v}"
-        for v in sorted(DF["Cell FDD TDD Indication"].dropna().unique())
-    ]
+_XGB_MODEL_FILES = {
+    "DL PRB Load":            "xgb_prb.json",
+    "Active Users":           "xgb_users.json",
+    "LTE DL User Throughput": "xgb_throughput.json",
+}
+_XGB_SCALER_FILES = {
+    "DL PRB Load":            "scaler_prb.pkl",
+    "Active Users":           "scaler_users.pkl",
+    "LTE DL User Throughput": "scaler_throughput.pkl",
+}
+
+_XGB_MODELS:  dict = {}   # kpi → xgb.XGBRegressor
+_XGB_SCALERS: dict = {}   # kpi → sklearn scaler
+_XGB_META:    dict = {}   # loaded from meta.json
+
+# Per-KPI feature lists (set after meta is loaded; fallback hardcoded below)
+_XGB_FEATURES: dict = {}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Model loading (attempted once at import)
-# ─────────────────────────────────────────────────────────────────────────────
+def _xgb_feature_list(rolling_col: str, fdd_cols: list) -> list:
+    return [
+        "cell_id", "site_id", "region_id",
+        "prb_lag_1d", "throughput_lag_1d", "users_lag_1d",
+        "prb_lag_1w", "throughput_lag_1w", "users_lag_1w",
+        "prb_lag_2w", "throughput_lag_2w", "users_lag_2w",
+        rolling_col,
+        "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+        "month_sin", "month_cos", "is_weekend",
+    ] + list(fdd_cols)
 
-def _try_load():
-    for kpi, (mname, sname) in _KPI_FILES.items():
-        # Try .keras then .h5
-        for ext in [".keras", ".h5"]:
-            mp = os.path.join(_MODEL_DIR, mname + ext)
-            if os.path.exists(mp):
-                try:
-                    from keras.models import load_model as _lm
-                    _MODELS[kpi] = _lm(mp, compile=False)
-                except Exception:
-                    pass
-                break
 
-        # Scaler (.pkl)
-        sp = os.path.join(_MODEL_DIR, sname + ".pkl")
-        if os.path.exists(sp):
+def _try_load_xgb():
+    """Load XGBoost models, scalers, and meta.json once at import time."""
+    meta_path = os.path.join(_XGB_DIR, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                _XGB_META.update(json.load(f))
+        except Exception:
+            pass
+
+    fdd_cols = _XGB_META.get("fdd_cols", [])
+    _XGB_FEATURES.update({
+        "DL PRB Load":            _xgb_feature_list("prb_rolling_24h",       fdd_cols),
+        "Active Users":           _xgb_feature_list("users_rolling_24h",      fdd_cols),
+        "LTE DL User Throughput": _xgb_feature_list("throughput_rolling_24h", fdd_cols),
+    })
+
+    for kpi, fname in _XGB_MODEL_FILES.items():
+        mp = os.path.join(_XGB_DIR, fname)
+        if os.path.exists(mp):
             try:
-                import joblib
-                _SCALERS[kpi] = joblib.load(sp)
+                import xgboost as xgb
+                m = xgb.XGBRegressor()
+                m.load_model(mp)
+                _XGB_MODELS[kpi] = m
             except Exception:
                 pass
 
-_try_load()
+    for kpi, fname in _XGB_SCALER_FILES.items():
+        sp = os.path.join(_XGB_DIR, fname)
+        if os.path.exists(sp):
+            try:
+                import joblib
+                _XGB_SCALERS[kpi] = joblib.load(sp)
+            except Exception:
+                pass
+
+_try_load_xgb()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,7 +118,7 @@ _try_load()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_cell_index(df: pd.DataFrame) -> dict:
-    """Return {cell_name: series indexed by Time} for all 3 KPIs."""
+    """Return {cell_name: DataFrame indexed by Time} for all 3 KPIs."""
     kpis = ["DL PRB Load", "Active Users", "LTE DL User Throughput"]
     idx = {}
     for cn, grp in df.groupby("Cell Name"):
@@ -134,6 +135,90 @@ def _lag_lookup(series: pd.Series, t: pd.Timestamp, h: int):
         return np.nan
 
 
+def _rolling24(series: pd.Series, t: pd.Timestamp) -> float:
+    """Mean of the 24 real-history hours ending just before t."""
+    lo = t - pd.Timedelta(hours=24)
+    hi = t - pd.Timedelta(hours=1)
+    window = series.loc[lo:hi]
+    return float(window.mean()) if not window.empty else 0.0
+
+
+def _cell_fdd(cell_name: str) -> str:
+    if DF.empty or "Cell FDD TDD Indication" not in DF.columns:
+        return ""
+    rows = DF.loc[DF["Cell Name"] == cell_name, "Cell FDD TDD Indication"]
+    return str(rows.iloc[0]) if not rows.empty else ""
+
+
+def _build_xgb_rows(kpi: str, cell_name: str, forecast_times: list,
+                    hist) -> list[dict]:
+    """Build one feature-dict per forecast timestamp for the XGBoost model."""
+    meta     = _XGB_META
+    fdd_cols = meta.get("fdd_cols", [])
+
+    cell_id   = meta.get("cell_codes",   {}).get(cell_name, 0)
+    site_name = meta.get("cell_to_site", {}).get(cell_name, "")
+    reg_name  = meta.get("cell_to_region", {}).get(cell_name, "")
+    site_id   = meta.get("site_codes",   {}).get(site_name, 0)
+    region_id = meta.get("region_codes", {}).get(reg_name,  0)
+
+    fdd_val = _cell_fdd(cell_name)
+
+    # Determine which column holds the target's rolling feature
+    _rolling_col = {
+        "DL PRB Load":            "prb_rolling_24h",
+        "Active Users":           "users_rolling_24h",
+        "LTE DL User Throughput": "throughput_rolling_24h",
+    }[kpi]
+    _rolling_kpi = {
+        "prb_rolling_24h":         "DL PRB Load",
+        "users_rolling_24h":       "Active Users",
+        "throughput_rolling_24h":  "LTE DL User Throughput",
+    }[_rolling_col]
+
+    rows = []
+    for ft in forecast_times:
+        def lag(k, h):
+            if hist is None or k not in hist.columns:
+                return 0.0
+            v = _lag_lookup(hist[k], ft, h)
+            return float(v) if not np.isnan(v) else 0.0
+
+        rolling_val = (
+            _rolling24(hist[_rolling_kpi], ft)
+            if hist is not None and _rolling_kpi in hist.columns
+            else 0.0
+        )
+
+        row = {
+            "cell_id":   cell_id,
+            "site_id":   site_id,
+            "region_id": region_id,
+            "prb_lag_1d":        lag("DL PRB Load",            24),
+            "throughput_lag_1d": lag("LTE DL User Throughput", 24),
+            "users_lag_1d":      lag("Active Users",           24),
+            "prb_lag_1w":        lag("DL PRB Load",            168),
+            "throughput_lag_1w": lag("LTE DL User Throughput", 168),
+            "users_lag_1w":      lag("Active Users",           168),
+            "prb_lag_2w":        lag("DL PRB Load",            336),
+            "throughput_lag_2w": lag("LTE DL User Throughput", 336),
+            "users_lag_2w":      lag("Active Users",           336),
+            _rolling_col:        rolling_val,
+            "hour_sin":   np.sin(2 * np.pi * ft.hour      / 24),
+            "hour_cos":   np.cos(2 * np.pi * ft.hour      / 24),
+            "dow_sin":    np.sin(2 * np.pi * ft.dayofweek / 7),
+            "dow_cos":    np.cos(2 * np.pi * ft.dayofweek / 7),
+            "month_sin":  np.sin(2 * np.pi * ft.month     / 12),
+            "month_cos":  np.cos(2 * np.pi * ft.month     / 12),
+            "is_weekend": int(ft.dayofweek >= 5),
+        }
+        for col in fdd_cols:
+            v = col.replace("Cell FDD TDD Indication_", "")
+            row[col] = 1 if fdd_val == v else 0
+        rows.append(row)
+    return rows
+
+
 def _forecast_one_cell_one_kpi(
     kpi: str,
     cell_name: str,
@@ -143,81 +228,38 @@ def _forecast_one_cell_one_kpi(
     """
     Predict `kpi` for `cell_name` at each timestamp in `forecast_times`.
 
-    Strategy:
-      1. Build lag features for 24h / 168h / 336h.
-      2. If model + scaler are available, run the neural network and blend.
-      3. Otherwise, average available lags (lag-blend fallback).
+    If the XGBoost model is loaded: return its predictions directly.
+    Fallback (no model): average of T-24h, T-168h, T-336h historical values.
     """
     hist = cell_index.get(cell_name)
 
-    lags_24  = np.full(len(forecast_times), np.nan)
-    lags_168 = np.full(len(forecast_times), np.nan)
-    lags_336 = np.full(len(forecast_times), np.nan)
+    # ── XGBoost path (preferred) ──────────────────────────────────────────────
+    model  = _XGB_MODELS.get(kpi)
+    scaler = _XGB_SCALERS.get(kpi)
+    feats  = _XGB_FEATURES.get(kpi, [])
 
-    if hist is not None and kpi in hist.columns:
-        s = hist[kpi]
-        for i, t in enumerate(forecast_times):
-            lags_24[i]  = _lag_lookup(s, t, 24)
-            lags_168[i] = _lag_lookup(s, t, 168)
-            lags_336[i] = _lag_lookup(s, t, 336)
-
-    # ── Neural net path ──────────────────────────────────────────────────────
-    model  = _MODELS.get(kpi)
-    scaler = _SCALERS.get(kpi)
-
-    model_preds = None
-    if model is not None and scaler is not None and hist is not None:
-        feat_names = _FEATURES[kpi] + _FDD_COLS
-        rows = []
-        for i, t in enumerate(forecast_times):
-            # Use same-lag values as proxies for "current" correlated KPIs
-            row = {
-                "cell_id":        _CELL_IDS.get(cell_name, 0),
-                "prb_lag":        _lag_lookup(hist["DL PRB Load"],            t, _LAG_H) if "DL PRB Load"            in hist.columns else np.nan,
-                "users_lag":      _lag_lookup(hist["Active Users"],            t, _LAG_H) if "Active Users"            in hist.columns else np.nan,
-                "throughput_lag": _lag_lookup(hist["LTE DL User Throughput"],  t, _LAG_H) if "LTE DL User Throughput"  in hist.columns else np.nan,
-            }
-            # Correlated KPI proxies — use same-hour 1-week ago value
-            for other_kpi in ["DL PRB Load", "Active Users", "LTE DL User Throughput"]:
-                if other_kpi != kpi and hist is not None and other_kpi in hist.columns:
-                    row[other_kpi] = _lag_lookup(hist[other_kpi], t, 168)
-
-            for fc in _FDD_COLS:
-                col_src = fc.replace("Cell FDD TDD Indication_", "")
-                row[fc] = 1 if _cell_fdd(cell_name) == col_src else 0
-
-            rows.append(row)
-
+    if model is not None and scaler is not None and feats:
+        rows = _build_xgb_rows(kpi, cell_name, forecast_times, hist)
         X_df = pd.DataFrame(rows)
-        for fn in feat_names:
+        for fn in feats:
             if fn not in X_df.columns:
                 X_df[fn] = 0
-        X_df = X_df[feat_names].fillna(0)
-
+        X_df = X_df[feats].fillna(0)
         try:
-            X_scaled    = scaler.transform(X_df.values)
-            model_preds = model.predict(X_scaled, verbose=0).flatten()
+            return model.predict(scaler.transform(X_df.values))
         except Exception:
-            model_preds = None
+            pass  # fall through to lag fallback
 
-    # ── Blend ────────────────────────────────────────────────────────────────
-    sources = [s for s in [lags_24, lags_168, lags_336] if not np.all(np.isnan(s))]
-    if model_preds is not None:
-        sources.insert(0, model_preds)
-
-    if not sources:
+    # ── Lag-blend fallback (no model available) ───────────────────────────────
+    if hist is None or kpi not in hist.columns:
         return np.full(len(forecast_times), np.nan)
 
-    stack = np.vstack(sources)                          # (N_sources, T)
-    return np.nanmean(stack, axis=0)                    # (T,)
-
-
-def _cell_fdd(cell_name: str) -> str:
-    """Return the FDD/TDD indication for a cell (from DF)."""
-    if DF.empty or "Cell FDD TDD Indication" not in DF.columns:
-        return ""
-    rows = DF.loc[DF["Cell Name"] == cell_name, "Cell FDD TDD Indication"]
-    return str(rows.iloc[0]) if not rows.empty else ""
+    s = hist[kpi]
+    lags = np.array([
+        [_lag_lookup(s, t, 24), _lag_lookup(s, t, 168), _lag_lookup(s, t, 336)]
+        for t in forecast_times
+    ])
+    return np.nanmean(lags, axis=1)
 
 
 def run_forecast(
@@ -301,7 +343,7 @@ def run_forecast(
             "max_prb":  round(float(max_prb),  2) if pd.notna(max_prb)  else None,
             "mean_prb": round(float(mean_prb), 2) if pd.notna(mean_prb) else None,
         },
-        "method":       "model+lag" if _MODELS else "lag-only",
+        "method":       "model+lag" if _XGB_MODELS else "lag-only",
         "horizon":      horizon_hours,
         "thresholds":   t,
         # keep these for backwards-compat with existing chart callbacks
@@ -355,12 +397,16 @@ def _badge(label, color, bg=None):
     Input("fc-model-status-bar", "id"),          # fires once on mount
 )
 def update_model_status_bar(_):
+    labels = {
+        "DL PRB Load":            "PRB Model",
+        "Active Users":           "Active Users Model",
+        "LTE DL User Throughput": "Throughput Model",
+    }
     badges = []
-    for kpi, (mname, _) in _KPI_FILES.items():
-        loaded = kpi in _MODELS
-        label  = mname.replace("_", " ").title()
+    for kpi, label in labels.items():
+        loaded = kpi in _XGB_MODELS
         if loaded:
-            badges.append(_badge(f"✓ {label}", _SUCCESS))
+            badges.append(_badge(f"✓ {label} (XGBoost)", _SUCCESS))
         else:
             badges.append(_badge(f"◌ {label} (lag fallback)", "#94a3b8"))
     return badges
@@ -899,58 +945,8 @@ def refresh_cache(n_clicks, prb_thr, usr_thr):
             if kpi not in DF.columns:
                 continue
 
-            lags_168 = np.full(len(forecast_times), np.nan)
-            lags_336 = np.full(len(forecast_times), np.nan)
-            if hist is not None and kpi in hist.columns:
-                s = hist[kpi]
-                for i, t in enumerate(forecast_times):
-                    try:
-                        lags_168[i] = s.at[t - pd.Timedelta(hours=168)]
-                    except KeyError:
-                        pass
-                    try:
-                        lags_336[i] = s.at[t - pd.Timedelta(hours=336)]
-                    except KeyError:
-                        pass
-
-            model_preds = None
-            model  = _MODELS.get(kpi)
-            scaler = _SCALERS.get(kpi)
-            if model and scaler and hist is not None:
-                feat_names = _FEATURES[kpi] + _FDD_COLS
-                rows = []
-                for i, t in enumerate(forecast_times):
-                    row = {
-                        "cell_id":        _CELL_IDS.get(cn, 0),
-                        "prb_lag":        hist["DL PRB Load"].get(t - pd.Timedelta(hours=_LAG_H), np.nan)        if "DL PRB Load"            in hist.columns else np.nan,
-                        "users_lag":      hist["Active Users"].get(t - pd.Timedelta(hours=_LAG_H), np.nan)       if "Active Users"            in hist.columns else np.nan,
-                        "throughput_lag": hist["LTE DL User Throughput"].get(t - pd.Timedelta(hours=_LAG_H), np.nan) if "LTE DL User Throughput" in hist.columns else np.nan,
-                    }
-                    for other in [k for k in kpis if k != kpi]:
-                        if hist is not None and other in hist.columns:
-                            row[other] = hist[other].get(t - pd.Timedelta(hours=168), np.nan)
-                    for fc in _FDD_COLS:
-                        row[fc] = 1 if _cell_fdd(cn) == fc.replace("Cell FDD TDD Indication_", "") else 0
-                    rows.append(row)
-                X_df = pd.DataFrame(rows)
-                for fn in feat_names:
-                    if fn not in X_df.columns:
-                        X_df[fn] = 0
-                X_df = X_df[feat_names].fillna(0)
-                try:
-                    model_preds = model.predict(scaler.transform(X_df.values), verbose=0).flatten()
-                except Exception:
-                    model_preds = None
-
-            # Blend: mean(model, lag_1w, lag_2w)
-            sources = []
-            if model_preds is not None:
-                sources.append(model_preds)
-            if not np.all(np.isnan(lags_168)):
-                sources.append(lags_168)
-            if not np.all(np.isnan(lags_336)):
-                sources.append(lags_336)
-            preds = np.nanmean(np.vstack(sources), axis=0) if sources else np.full(len(forecast_times), np.nan)
+            # Use _forecast_one_cell_one_kpi for consistency: XGBoost if available, lag fallback otherwise
+            preds = _forecast_one_cell_one_kpi(kpi, cn, forecast_times, cell_index)
 
             for i, t in enumerate(forecast_times):
                 records.append({
