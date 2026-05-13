@@ -54,6 +54,39 @@ def make_empty_figure(title: str) -> go.Figure:
     return fig
 
 
+def recompute_congestion_flags(df: pd.DataFrame, thresholds: dict) -> pd.DataFrame:
+    """
+    Re-derive P0/P1 congestion flags from raw KPI columns using custom thresholds.
+    Uses the same 3-way AND logic as congestion_engine / congestion.py.
+    Only rewrites the flag + level columns; leaves all other columns intact.
+    Returns a copy — does not mutate the input.
+    """
+    needed = ["DL PRB Load", "LTE DL User Throughput", "Active Users"]
+    if df.empty or not all(c in df.columns for c in needed):
+        return df
+
+    df = df.copy()
+    prb = df["DL PRB Load"].fillna(0)
+    thp = df["LTE DL User Throughput"].fillna(9_999_999)
+    usr = df["Active Users"].fillna(0)
+
+    p0_prb   = float(thresholds.get("p0_prb",   90))
+    p0_thp   = float(thresholds.get("p0_thp",   2000))
+    p0_users = float(thresholds.get("p0_users", 8))
+    p1_prb   = float(thresholds.get("p1_prb",   80))
+    p1_thp   = float(thresholds.get("p1_thp",   4000))
+    p1_users = float(thresholds.get("p1_users", 4))
+
+    df["P0_Congestion"] = (prb > p0_prb) & (thp < p0_thp) & (usr > p0_users)
+    df["P1_Congestion"] = (prb > p1_prb) & (thp < p1_thp) & (usr > p1_users)
+    df.loc[df["P0_Congestion"], "P1_Congestion"] = False
+
+    df["CongestionLevelHour"] = "None"
+    df.loc[df["P1_Congestion"], "CongestionLevelHour"] = "P1"
+    df.loc[df["P0_Congestion"], "CongestionLevelHour"] = "P0"
+    return df
+
+
 def _filter_dataframe_impl(df, regions, radio_sites, cells, modes, start, end):
     """Single-source filter logic. Filters by Cell Name (not Cell Key)."""
     out = df

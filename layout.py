@@ -6,8 +6,10 @@ Call build_layout() after the app is created.
 import dash_leaflet as dl
 from dash import dcc, html, dash_table
 
+from pathlib import Path
+
 from config import (
-    DATA_PATH, DEFAULT_KPI, DEFAULT_KPI_2, DEFAULT_KPI_3,
+    DATA_PATH, RAW_DATA_PATH, DEFAULT_KPI, DEFAULT_KPI_2, DEFAULT_KPI_3,
     DEFAULT_X, DEFAULT_Y, DEFAULT_COLOR,
     P0_COLOR, P1_COLOR,
     SECTOR_ZOOM_THRESHOLD,
@@ -15,6 +17,7 @@ from config import (
     ACCENT, TEXT_MUTED, TEXT_PRIMARY, BORDER_COLOR, SURFACE,
     _PILL_BTN, _PRIMARY_BTN, _TAB_STYLE, _TAB_SELECTED,
 )
+from congestion_engine import DEFAULT_THRESHOLDS as _DT
 from data_utils import categorical_options
 from precompute import (
     DF, LOAD_ERROR,
@@ -31,6 +34,21 @@ _LBL = {"fontSize": "11px", "fontWeight": 600, "color": TEXT_MUTED,
         "marginBottom": "4px", "display": "block"}
 
 _DD_STYLE = {"fontSize": "13px"}
+
+
+def _thr_input(key: str, label: str, default, mn, mx):
+    """Labelled number input for a single congestion threshold."""
+    return html.Div([
+        html.Label(label, style={"fontSize": "11px", "color": TEXT_MUTED,
+                                  "display": "block", "marginBottom": "3px"}),
+        dcc.Input(
+            id=f"thr-{key}", type="number",
+            value=default, min=mn, max=mx, step=1,
+            debounce=True,
+            style={"width": "90px", "padding": "4px 8px", "fontSize": "12px",
+                   "border": f"1px solid {BORDER_COLOR}", "borderRadius": "8px"},
+        ),
+    ])
 
 
 def build_layout():
@@ -158,6 +176,70 @@ def build_layout():
             "boxShadow": "0 2px 8px rgba(0,0,0,0.04)",
         }),
 
+        # ══ Data Management bar ═══════════════════════════════════════════
+        html.Div([
+            # Dataset status
+            html.Div([
+                html.Span("📂", style={"marginRight": "6px"}),
+                html.Span(
+                    "Congestion dataset loaded" if not LOAD_ERROR
+                    else "Congestion dataset missing",
+                    style={"fontWeight": 600, "fontSize": "12px",
+                           "color": "#15803d" if not LOAD_ERROR else "#b91c1c",
+                           "marginRight": "10px"},
+                ),
+                html.Span(
+                    f"{len(DF):,} rows · {DATA_PATH.split('/')[-1]}"
+                    if not LOAD_ERROR else DATA_PATH,
+                    style={"fontSize": "11px", "color": TEXT_MUTED},
+                ),
+            ], style={"display": "flex", "alignItems": "center"}),
+
+            # Raw data status + recompute control
+            html.Div([
+                html.Span(
+                    "🗃️ Raw: " + (
+                        RAW_DATA_PATH.split("/")[-1] + " found"
+                        if Path(RAW_DATA_PATH).exists()
+                        else RAW_DATA_PATH.split("/")[-1] + " not found"
+                    ),
+                    style={"fontSize": "11px", "color": TEXT_MUTED,
+                           "marginRight": "12px"},
+                ),
+                dcc.Input(
+                    id="raw-data-path-input",
+                    value=RAW_DATA_PATH,
+                    type="text",
+                    placeholder="Path to raw KPI CSV…",
+                    style={"fontSize": "11px", "padding": "4px 8px",
+                           "border": f"1px solid {BORDER_COLOR}",
+                           "borderRadius": "8px", "width": "220px",
+                           "marginRight": "6px"},
+                ),
+                html.Button(
+                    "⚙️ Compute Congestion",
+                    id="recompute-congestion-btn", n_clicks=0,
+                    style={**_PILL_BTN, "fontSize": "11px",
+                           "background": "#f0fdf4",
+                           "border": "1px solid #86efac",
+                           "color": "#15803d"},
+                ),
+                html.Span(
+                    id="recompute-status",
+                    style={"fontSize": "11px", "color": TEXT_MUTED,
+                           "marginLeft": "10px"},
+                ),
+            ], style={"display": "flex", "alignItems": "center"}),
+        ], style={
+            "display": "flex", "alignItems": "center",
+            "justifyContent": "space-between", "flexWrap": "wrap",
+            "gap": "8px",
+            "padding": "8px 28px",
+            "background": "#f0fdf4" if not LOAD_ERROR else "#fef2f2",
+            "borderBottom": f"1px solid {BORDER_COLOR}",
+            "fontSize": "12px",
+        }),
+
         # ══ Main content ══════════════════════════════════════════════════
         html.Div([
 
@@ -192,6 +274,12 @@ def build_layout():
         dcc.Store(id="map-zoom-store",          data=8),
         dcc.Store(id="_map-export-dummy",       data=None),
         dcc.Store(id="sector-approach-store",   data="ta"),
+        dcc.Store(id="congestion-thresholds-store", data={
+            "p0_prb":   _DT["p0_prb"],   "p0_thp":   _DT["p0_thp"],
+            "p0_users": _DT["p0_users"],
+            "p1_prb":   _DT["p1_prb"],   "p1_thp":   _DT["p1_thp"],
+            "p1_users": _DT["p1_users"],
+        }),
         dcc.Interval(id="anim-interval", interval=900, n_intervals=0, disabled=True),
 
     ], style=APP_STYLE)
@@ -318,6 +406,46 @@ def _tab_congestion_analytics():
                 "padding": "10px 16px", "background": "#fffbeb",
                 "border": "1px solid #fde68a", "borderRadius": "12px",
                 "marginBottom": "16px", "display": "flex", "alignItems": "center",
+            }),
+
+            # ── Threshold controls ─────────────────────────────────────────
+            html.Details([
+                html.Summary("⚙️  Congestion Thresholds",
+                             style={"cursor": "pointer", "fontWeight": 600,
+                                    "fontSize": "13px", "color": TEXT_PRIMARY,
+                                    "userSelect": "none"}),
+                html.Div([
+                    # P0 group
+                    html.Div([
+                        html.Div("🔴 P0 — all three must hold simultaneously",
+                                 style={"fontSize": "11px", "fontWeight": 700,
+                                        "color": P0_COLOR, "marginBottom": "8px"}),
+                        html.Div([
+                            _thr_input("p0_prb",   "PRB Load > (%)",       _DT["p0_prb"],   50, 100),
+                            _thr_input("p0_thp",   "Throughput < (kbps)",  _DT["p0_thp"],   500, 20000),
+                            _thr_input("p0_users", "Active Users >",       _DT["p0_users"], 1, 100),
+                        ], style={"display": "flex", "gap": "16px", "flexWrap": "wrap"}),
+                    ], style={"flex": 1}),
+                    # Divider
+                    html.Div(style={"width": "1px", "background": BORDER_COLOR,
+                                    "margin": "0 12px", "alignSelf": "stretch"}),
+                    # P1 group
+                    html.Div([
+                        html.Div("🟠 P1 — all three must hold simultaneously",
+                                 style={"fontSize": "11px", "fontWeight": 700,
+                                        "color": P1_COLOR, "marginBottom": "8px"}),
+                        html.Div([
+                            _thr_input("p1_prb",   "PRB Load > (%)",       _DT["p1_prb"],   40, 95),
+                            _thr_input("p1_thp",   "Throughput < (kbps)",  _DT["p1_thp"],   500, 20000),
+                            _thr_input("p1_users", "Active Users >",       _DT["p1_users"], 1, 50),
+                        ], style={"display": "flex", "gap": "16px", "flexWrap": "wrap"}),
+                    ], style={"flex": 1}),
+                ], style={"display": "flex", "gap": "8px",
+                          "padding": "14px 0 4px", "flexWrap": "wrap"}),
+            ], style={
+                "padding": "10px 14px", "marginBottom": "16px",
+                "background": "#fffbeb", "border": "1px solid #fde68a",
+                "borderRadius": "12px",
             }),
 
             html.Div(id="congestion-cards", style={

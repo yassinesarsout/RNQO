@@ -20,6 +20,17 @@ _SUCCESS     = "#22c55e"
 
 _SECTION = {**SECTION_STYLE, "marginBottom": "16px"}
 
+_INP = {"padding": "4px 8px", "border": "1px solid #d1d5db",
+        "borderRadius": "8px", "fontSize": "12px"}
+
+def _fc_thr_inp(id_: str, label: str, default, mn, mx):
+    return html.Div([
+        html.Label(label, style={"fontSize": "10px", "color": "#64748b",
+                                  "display": "block", "marginBottom": "2px"}),
+        dcc.Input(id=id_, type="number", value=default, min=mn, max=mx,
+                  debounce=True, style={**_INP, "width": "80px"}),
+    ])
+
 _RUN_BTN = {
     **_PRIMARY_BTN,
     "background": _ACCENT,
@@ -145,31 +156,36 @@ def build_forecast_tab():
                     ),
                 ], style={"flex": 1, "minWidth": "260px"}),
 
-                # PRB threshold
+                # Thresholds — 3-KPI approach matching congestion_engine.py
                 html.Div([
-                    html.Label("PRB P0 Threshold (%)",
-                               style={"fontSize": "12px", "fontWeight": 600,
-                                      "color": "#374151", "marginBottom": "6px",
+                    html.Label("🔴 P0 Thresholds",
+                               style={"fontSize": "11px", "fontWeight": 700,
+                                      "color": _DANGER, "marginBottom": "6px",
                                       "display": "block"}),
-                    dcc.Input(id="fc-prb-threshold", type="number",
-                              value=90, min=50, max=100, step=1,
-                              style={"width": "80px", "padding": "5px 8px",
-                                     "border": "1px solid #d1d5db",
-                                     "borderRadius": "8px", "fontSize": "13px"}),
+                    html.Div([
+                        _fc_thr_inp("fc-p0-prb",   "PRB > (%)",      90, 50, 100),
+                        _fc_thr_inp("fc-p0-thp",   "Tput < (kbps)", 2000, 100, 20000),
+                        _fc_thr_inp("fc-p0-users", "Users >",          8, 1, 200),
+                    ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap"}),
                 ], style={"flex": "0 0 auto"}),
 
-                # Users threshold
                 html.Div([
-                    html.Label("Users P1 Threshold",
-                               style={"fontSize": "12px", "fontWeight": 600,
-                                      "color": "#374151", "marginBottom": "6px",
+                    html.Label("🟠 P1 Thresholds",
+                               style={"fontSize": "11px", "fontWeight": 700,
+                                      "color": _WARN, "marginBottom": "6px",
                                       "display": "block"}),
-                    dcc.Input(id="fc-users-threshold", type="number",
-                              value=4, min=1, max=100, step=1,
-                              style={"width": "80px", "padding": "5px 8px",
-                                     "border": "1px solid #d1d5db",
-                                     "borderRadius": "8px", "fontSize": "13px"}),
+                    html.Div([
+                        _fc_thr_inp("fc-p1-prb",   "PRB > (%)",      80, 40, 99),
+                        _fc_thr_inp("fc-p1-thp",   "Tput < (kbps)", 4000, 100, 20000),
+                        _fc_thr_inp("fc-p1-users", "Users >",          4, 1, 100),
+                    ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap"}),
                 ], style={"flex": "0 0 auto"}),
+
+                # Keep legacy IDs for backward compat with old callbacks
+                html.Div([
+                    dcc.Input(id="fc-prb-threshold",   type="number", value=90, style={"display":"none"}),
+                    dcc.Input(id="fc-users-threshold", type="number", value=4,  style={"display":"none"}),
+                ]),
 
                 # Run + cache buttons
                 html.Div([

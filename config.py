@@ -3,7 +3,8 @@ Dashboard constants — data paths, KPI defaults, congestion tiers,
 cache limits, and UI styles.
 """
 
-DATA_PATH = "datasets/kpi_with_congestion.csv"
+DATA_PATH     = "datasets/kpi_with_congestion.csv"
+RAW_DATA_PATH = "datasets/final_kpi_data.csv"     # input to congestion engine
 
 MAX_SCATTER_POINTS = 20000
 MAX_HIST_POINTS    = 50000

@@ -223,8 +223,7 @@ def _cell_fdd(cell_name: str) -> str:
 def run_forecast(
     cells: list,
     horizon_hours: int,
-    prb_threshold: float,
-    users_threshold: float,
+    thresholds: dict | None = None,
 ) -> dict:
     """
     Main entry point.  Returns a dict that is JSON-serialisable and stored
@@ -238,65 +237,63 @@ def run_forecast(
     if not cells or DF.empty:
         return {}
 
+    from congestion_engine import DEFAULT_THRESHOLDS as _DT
+    t = {**_DT, **(thresholds or {})}
+
     cell_index = _make_cell_index(DF)
     last_time  = DF["Time"].max()
     forecast_times = [last_time + pd.Timedelta(hours=h + 1) for h in range(horizon_hours)]
 
-    kpis_to_forecast = [
-        "DL PRB Load",
-        "Active Users",
-        "LTE DL User Throughput",
-    ]
+    kpis_to_forecast = ["DL PRB Load", "Active Users", "LTE DL User Throughput"]
 
     records = []
     for cn in cells:
         kpi_preds = {}
         for kpi in kpis_to_forecast:
-            if kpi in (DF.columns.tolist()):
+            if kpi in DF.columns:
                 kpi_preds[kpi] = _forecast_one_cell_one_kpi(
-                    kpi, cn, forecast_times, cell_index
-                )
+                    kpi, cn, forecast_times, cell_index)
             else:
                 kpi_preds[kpi] = np.full(len(forecast_times), np.nan)
 
-        for i, t in enumerate(forecast_times):
-            prb  = float(kpi_preds["DL PRB Load"][i])   if not np.isnan(kpi_preds["DL PRB Load"][i])   else None
-            usr  = float(kpi_preds["Active Users"][i])  if not np.isnan(kpi_preds["Active Users"][i])  else None
-            tput = float(kpi_preds["LTE DL User Throughput"][i]) if not np.isnan(kpi_preds["LTE DL User Throughput"][i]) else None
+        for i, ft in enumerate(forecast_times):
+            prb  = float(kpi_preds["DL PRB Load"][i])              if not np.isnan(kpi_preds["DL PRB Load"][i])              else None
+            usr  = float(kpi_preds["Active Users"][i])             if not np.isnan(kpi_preds["Active Users"][i])             else None
+            tput = float(kpi_preds["LTE DL User Throughput"][i])   if not np.isnan(kpi_preds["LTE DL User Throughput"][i])   else None
 
-            # Congestion
-            if prb is not None and prb >= prb_threshold:
+            # ── 3-KPI AND logic — identical to congestion_engine.py ─────────
+            if (prb  is not None and prb  > t["p0_prb"]
+                    and tput is not None and tput < t["p0_thp"]
+                    and usr  is not None and usr  > t["p0_users"]):
                 risk = "P0"
-            elif (prb is not None and prb >= prb_threshold * 0.75) or \
-                 (usr is not None and usr >= users_threshold):
+            elif (prb  is not None and prb  > t["p1_prb"]
+                    and tput is not None and tput < t["p1_thp"]
+                    and usr  is not None and usr  > t["p1_users"]):
                 risk = "P1"
             else:
                 risk = "Not Congested"
 
             records.append({
-                "Time":                    t.isoformat(),
-                "Cell Name":               cn,
-                "DL PRB Load":             prb,
-                "Active Users":            usr,
-                "LTE DL User Throughput":  tput,
-                "Hour":                    t.hour,
-                "Risk Level":              risk,
+                "Time":                   ft.isoformat(),
+                "Cell Name":              cn,
+                "DL PRB Load":            prb,
+                "Active Users":           usr,
+                "LTE DL User Throughput": tput,
+                "Hour":                   ft.hour,
+                "Risk Level":             risk,
             })
 
     if not records:
         return {}
 
-    fc_df = pd.DataFrame(records)
-
-    p0_cells  = fc_df.loc[fc_df["Risk Level"] == "P0",  "Cell Name"].nunique()
-    p1_cells  = fc_df.loc[fc_df["Risk Level"] == "P1",  "Cell Name"].nunique()
-    max_prb   = fc_df["DL PRB Load"].max()
-    mean_prb  = fc_df["DL PRB Load"].mean()
-
-    method = "model+lag" if _MODELS else "lag-only"
+    fc_df    = pd.DataFrame(records)
+    p0_cells = fc_df.loc[fc_df["Risk Level"] == "P0", "Cell Name"].nunique()
+    p1_cells = fc_df.loc[fc_df["Risk Level"] == "P1", "Cell Name"].nunique()
+    max_prb  = fc_df["DL PRB Load"].max()
+    mean_prb = fc_df["DL PRB Load"].mean()
 
     return {
-        "records":  records,
+        "records": records,
         "summary": {
             "n_cells":  len(cells),
             "p0_cells": int(p0_cells),
@@ -304,10 +301,12 @@ def run_forecast(
             "max_prb":  round(float(max_prb),  2) if pd.notna(max_prb)  else None,
             "mean_prb": round(float(mean_prb), 2) if pd.notna(mean_prb) else None,
         },
-        "method": method,
-        "horizon": horizon_hours,
-        "prb_threshold":   prb_threshold,
-        "users_threshold": users_threshold,
+        "method":       "model+lag" if _MODELS else "lag-only",
+        "horizon":      horizon_hours,
+        "thresholds":   t,
+        # keep these for backwards-compat with existing chart callbacks
+        "prb_threshold":   t["p0_prb"],
+        "users_threshold": t["p1_users"],
     }
 
 
@@ -403,17 +402,27 @@ def auto_select_cells(auto_n, clear_n, current):
     Input("fc-run-btn",        "n_clicks"),
     State("fc-cell-selector",  "value"),
     State("fc-horizon",        "value"),
-    State("fc-prb-threshold",  "value"),
-    State("fc-users-threshold","value"),
+    State("fc-p0-prb",         "value"),
+    State("fc-p0-thp",         "value"),
+    State("fc-p0-users",       "value"),
+    State("fc-p1-prb",         "value"),
+    State("fc-p1-thp",         "value"),
+    State("fc-p1-users",       "value"),
     prevent_initial_call=True,
 )
-def run_forecast_callback(n_clicks, cells, horizon, prb_thr, usr_thr):
+def run_forecast_callback(n_clicks, cells, horizon,
+                          p0_prb, p0_thp, p0_users,
+                          p1_prb, p1_thp, p1_users):
     if not cells:
         return {}
-    horizon   = int(horizon  or 24)
-    prb_thr   = float(prb_thr  or DEFAULT_PRB_THRESHOLD)
-    usr_thr   = float(usr_thr  or DEFAULT_ACTIVE_USER_THRESHOLD)
-    return run_forecast(cells, horizon, prb_thr, usr_thr)
+    def _f(v, d): return float(v) if v is not None else d
+    thresholds = {
+        "p0_prb":   _f(p0_prb,   90),   "p0_thp":   _f(p0_thp,   2000),
+        "p0_users": _f(p0_users, 8),
+        "p1_prb":   _f(p1_prb,   80),   "p1_thp":   _f(p1_thp,   4000),
+        "p1_users": _f(p1_users, 4),
+    }
+    return run_forecast(cells, int(horizon or 24), thresholds)
 
 
 # ── 4. Summary cards ──────────────────────────────────────────────────────────
