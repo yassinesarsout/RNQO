@@ -22,10 +22,7 @@ from config import (
 )
 from congestion_engine import run_and_save as _cong_run_and_save
 from config import RAW_DATA_PATH as _RAW_DATA_PATH
-from data_utils import (
-    categorical_options, downsample, make_empty_figure, numeric_columns,
-    recompute_congestion_flags,
-)
+from data_utils import categorical_options, downsample, make_empty_figure, numeric_columns
 from geo_utils import split_site_key, point_in_polygon
 from precompute import (
     DF, CELL_GEO_META, SITE_SUMMARY,
@@ -111,46 +108,34 @@ def toggle_sector_approach(_, current):
 
 
 # ============================================================
-# Congestion threshold inputs → store
-# ============================================================
-@callback(
-    Output("congestion-thresholds-store", "data"),
-    Input("thr-p0_prb",   "value"),
-    Input("thr-p0_thp",   "value"),
-    Input("thr-p0_users", "value"),
-    Input("thr-p1_prb",   "value"),
-    Input("thr-p1_thp",   "value"),
-    Input("thr-p1_users", "value"),
-    prevent_initial_call=True,
-)
-def sync_thresholds(p0_prb, p0_thp, p0_users, p1_prb, p1_thp, p1_users):
-    from congestion_engine import DEFAULT_THRESHOLDS as _DT
-    def _v(val, default): return float(val) if val is not None else default
-    return {
-        "p0_prb":   _v(p0_prb,   _DT["p0_prb"]),
-        "p0_thp":   _v(p0_thp,   _DT["p0_thp"]),
-        "p0_users": _v(p0_users, _DT["p0_users"]),
-        "p1_prb":   _v(p1_prb,   _DT["p1_prb"]),
-        "p1_thp":   _v(p1_thp,   _DT["p1_thp"]),
-        "p1_users": _v(p1_users, _DT["p1_users"]),
-    }
-
-
-# ============================================================
-# Recompute congestion from raw KPI file
+# Settings tab — recompute congestion from raw KPI file
+# Thresholds are read directly from the Settings tab inputs.
+# The main dashboard always reads from the saved CSV (no live recompute).
 # ============================================================
 @callback(
     Output("recompute-status", "children"),
     Input("recompute-congestion-btn", "n_clicks"),
-    State("raw-data-path-input",       "value"),
-    State("congestion-thresholds-store", "data"),
+    State("raw-data-path-input", "value"),
+    State("thr-p0_prb",   "value"),  State("thr-p0_thp",   "value"),
+    State("thr-p0_users", "value"),
+    State("thr-p1_prb",   "value"),  State("thr-p1_thp",   "value"),
+    State("thr-p1_users", "value"),
     prevent_initial_call=True,
 )
-def recompute_congestion(n_clicks, raw_path, thresholds):
+def recompute_congestion(n_clicks, raw_path,
+                         p0_prb, p0_thp, p0_users,
+                         p1_prb, p1_thp, p1_users):
     if not n_clicks:
         raise PreventUpdate
-    path = (raw_path or _RAW_DATA_PATH).strip()
-    status = _cong_run_and_save(path, thresholds=thresholds or {})
+    def _f(v, d): return float(v) if v is not None else d
+    thresholds = {
+        "p0_prb":   _f(p0_prb,   90),  "p0_thp":   _f(p0_thp,   2000),
+        "p0_users": _f(p0_users, 8),
+        "p1_prb":   _f(p1_prb,   80),  "p1_thp":   _f(p1_thp,   4000),
+        "p1_users": _f(p1_users, 4),
+    }
+    path   = (raw_path or _RAW_DATA_PATH).strip()
+    status = _cong_run_and_save(path, thresholds=thresholds)
     if status.startswith("✅"):
         _df_filter_cache.clear()
     return status
@@ -640,7 +625,6 @@ def update_animation_hour(n_intervals, slider_val, reset_clicks, current_hour, p
     Input("scatter-x",      "value"),
     Input("scatter-y",      "value"),
     Input("scatter-color",  "value"),
-    State("congestion-thresholds-store", "data"),
 )
 def update_dashboard(
     selected_regions, selected_sites, selected_cells, selected_modes,
@@ -648,7 +632,6 @@ def update_dashboard(
     main_kpi, main_kpi_2, main_kpi_3,
     hist_kpi, top_kpi,
     scatter_x, scatter_y, scatter_color,
-    cong_thresholds,
 ):
     if DF.empty:
         empty = make_empty_figure("No data")
@@ -659,11 +642,6 @@ def update_dashboard(
         selected_regions, selected_sites, selected_cells,
         selected_modes, start_date, end_date,
     )
-
-    # Recompute P0/P1 flags with user-defined thresholds (if they differ from defaults)
-    if cong_thresholds:
-        filtered = recompute_congestion_flags(filtered, cong_thresholds)
-
     cards = build_summary_cards(filtered)
 
     # ---- Time-series (area chart) ----

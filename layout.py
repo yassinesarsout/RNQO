@@ -176,70 +176,6 @@ def build_layout():
             "boxShadow": "0 2px 8px rgba(0,0,0,0.04)",
         }),
 
-        # ══ Data Management bar ═══════════════════════════════════════════
-        html.Div([
-            # Dataset status
-            html.Div([
-                html.Span("📂", style={"marginRight": "6px"}),
-                html.Span(
-                    "Congestion dataset loaded" if not LOAD_ERROR
-                    else "Congestion dataset missing",
-                    style={"fontWeight": 600, "fontSize": "12px",
-                           "color": "#15803d" if not LOAD_ERROR else "#b91c1c",
-                           "marginRight": "10px"},
-                ),
-                html.Span(
-                    f"{len(DF):,} rows · {DATA_PATH.split('/')[-1]}"
-                    if not LOAD_ERROR else DATA_PATH,
-                    style={"fontSize": "11px", "color": TEXT_MUTED},
-                ),
-            ], style={"display": "flex", "alignItems": "center"}),
-
-            # Raw data status + recompute control
-            html.Div([
-                html.Span(
-                    "🗃️ Raw: " + (
-                        RAW_DATA_PATH.split("/")[-1] + " found"
-                        if Path(RAW_DATA_PATH).exists()
-                        else RAW_DATA_PATH.split("/")[-1] + " not found"
-                    ),
-                    style={"fontSize": "11px", "color": TEXT_MUTED,
-                           "marginRight": "12px"},
-                ),
-                dcc.Input(
-                    id="raw-data-path-input",
-                    value=RAW_DATA_PATH,
-                    type="text",
-                    placeholder="Path to raw KPI CSV…",
-                    style={"fontSize": "11px", "padding": "4px 8px",
-                           "border": f"1px solid {BORDER_COLOR}",
-                           "borderRadius": "8px", "width": "220px",
-                           "marginRight": "6px"},
-                ),
-                html.Button(
-                    "⚙️ Compute Congestion",
-                    id="recompute-congestion-btn", n_clicks=0,
-                    style={**_PILL_BTN, "fontSize": "11px",
-                           "background": "#f0fdf4",
-                           "border": "1px solid #86efac",
-                           "color": "#15803d"},
-                ),
-                html.Span(
-                    id="recompute-status",
-                    style={"fontSize": "11px", "color": TEXT_MUTED,
-                           "marginLeft": "10px"},
-                ),
-            ], style={"display": "flex", "alignItems": "center"}),
-        ], style={
-            "display": "flex", "alignItems": "center",
-            "justifyContent": "space-between", "flexWrap": "wrap",
-            "gap": "8px",
-            "padding": "8px 28px",
-            "background": "#f0fdf4" if not LOAD_ERROR else "#fef2f2",
-            "borderBottom": f"1px solid {BORDER_COLOR}",
-            "fontSize": "12px",
-        }),
-
         # ══ Main content ══════════════════════════════════════════════════
         html.Div([
 
@@ -256,6 +192,7 @@ def build_layout():
                 _tab_congestion_analytics(),
                 _tab_geometry_map(),
                 build_forecast_tab(),
+                _tab_settings(),
             ], style={
                 "borderBottom": f"1px solid {BORDER_COLOR}",
                 "marginBottom": "0",
@@ -406,46 +343,6 @@ def _tab_congestion_analytics():
                 "padding": "10px 16px", "background": "#fffbeb",
                 "border": "1px solid #fde68a", "borderRadius": "12px",
                 "marginBottom": "16px", "display": "flex", "alignItems": "center",
-            }),
-
-            # ── Threshold controls ─────────────────────────────────────────
-            html.Details([
-                html.Summary("⚙️  Congestion Thresholds",
-                             style={"cursor": "pointer", "fontWeight": 600,
-                                    "fontSize": "13px", "color": TEXT_PRIMARY,
-                                    "userSelect": "none"}),
-                html.Div([
-                    # P0 group
-                    html.Div([
-                        html.Div("🔴 P0 — all three must hold simultaneously",
-                                 style={"fontSize": "11px", "fontWeight": 700,
-                                        "color": P0_COLOR, "marginBottom": "8px"}),
-                        html.Div([
-                            _thr_input("p0_prb",   "PRB Load > (%)",       _DT["p0_prb"],   50, 100),
-                            _thr_input("p0_thp",   "Throughput < (kbps)",  _DT["p0_thp"],   500, 20000),
-                            _thr_input("p0_users", "Active Users >",       _DT["p0_users"], 1, 100),
-                        ], style={"display": "flex", "gap": "16px", "flexWrap": "wrap"}),
-                    ], style={"flex": 1}),
-                    # Divider
-                    html.Div(style={"width": "1px", "background": BORDER_COLOR,
-                                    "margin": "0 12px", "alignSelf": "stretch"}),
-                    # P1 group
-                    html.Div([
-                        html.Div("🟠 P1 — all three must hold simultaneously",
-                                 style={"fontSize": "11px", "fontWeight": 700,
-                                        "color": P1_COLOR, "marginBottom": "8px"}),
-                        html.Div([
-                            _thr_input("p1_prb",   "PRB Load > (%)",       _DT["p1_prb"],   40, 95),
-                            _thr_input("p1_thp",   "Throughput < (kbps)",  _DT["p1_thp"],   500, 20000),
-                            _thr_input("p1_users", "Active Users >",       _DT["p1_users"], 1, 50),
-                        ], style={"display": "flex", "gap": "16px", "flexWrap": "wrap"}),
-                    ], style={"flex": 1}),
-                ], style={"display": "flex", "gap": "8px",
-                          "padding": "14px 0 4px", "flexWrap": "wrap"}),
-            ], style={
-                "padding": "10px 14px", "marginBottom": "16px",
-                "background": "#fffbeb", "border": "1px solid #fde68a",
-                "borderRadius": "12px",
             }),
 
             html.Div(id="congestion-cards", style={
@@ -706,4 +603,123 @@ def _tab_geometry_map():
             ], style={"display": "flex", "gap": "14px"}),
 
         ], style={"paddingTop": "16px"})]
+    )
+
+
+def _tab_settings():
+    raw_exists = Path(RAW_DATA_PATH).exists()
+    raw_label  = RAW_DATA_PATH.split("/")[-1]
+
+    def _row(label, value):
+        ok = value and not str(value).startswith("❌")
+        return html.Div([
+            html.Span(label, style={"fontSize": "12px", "color": TEXT_MUTED,
+                                    "minWidth": "160px", "display": "inline-block"}),
+            html.Span(str(value), style={"fontSize": "12px",
+                                         "color": "#15803d" if ok else "#b91c1c",
+                                         "fontWeight": 500}),
+        ], style={"marginBottom": "6px"})
+
+    return dcc.Tab(
+        label="⚙️ Settings",
+        style=_TAB_STYLE, selected_style=_TAB_SELECTED,
+        children=[html.Div([
+
+            # ── Section 1: Dataset status ──────────────────────────────────
+            html.Div([
+                html.Div([
+                    html.Span("📂", style={"fontSize": "18px", "marginRight": "10px"}),
+                    html.Span("Dataset Status", style={"fontWeight": 700,
+                                                        "fontSize": "15px",
+                                                        "color": TEXT_PRIMARY}),
+                ], style={"display": "flex", "alignItems": "center",
+                          "marginBottom": "14px"}),
+                _row("Congestion dataset",
+                     f"{len(DF):,} rows loaded — {DATA_PATH}"
+                     if not LOAD_ERROR else f"❌ {LOAD_ERROR}"),
+                _row("Raw KPI file",
+                     f"{raw_label} found — {RAW_DATA_PATH}"
+                     if raw_exists else f"❌ {raw_label} not found"),
+            ], style=SECTION_STYLE),
+
+            # ── Section 2: Congestion engine ──────────────────────────────
+            html.Div([
+                html.Div([
+                    html.Span("🔄", style={"fontSize": "18px", "marginRight": "10px"}),
+                    html.Span("Recompute Congestion Dataset",
+                              style={"fontWeight": 700, "fontSize": "15px",
+                                     "color": TEXT_PRIMARY}),
+                ], style={"display": "flex", "alignItems": "center",
+                          "marginBottom": "6px"}),
+                html.P(
+                    "Set the thresholds below, point to the raw KPI CSV, then click "
+                    "Compute. The dashboard uses the saved CSV — changes only take "
+                    "effect after restarting the server.",
+                    style={"fontSize": "12px", "color": TEXT_MUTED,
+                           "marginBottom": "18px"},
+                ),
+
+                # Thresholds — P0
+                html.Div([
+                    html.Div("🔴 P0 — severe (all three must hold simultaneously)",
+                             style={"fontSize": "12px", "fontWeight": 700,
+                                    "color": P0_COLOR, "marginBottom": "10px"}),
+                    html.Div([
+                        _thr_input("p0_prb",   "DL PRB Load > (%)",      _DT["p0_prb"],   50, 100),
+                        _thr_input("p0_thp",   "DL Throughput < (kbps)", _DT["p0_thp"],   100, 50000),
+                        _thr_input("p0_users", "Active Users >",         _DT["p0_users"], 1, 200),
+                    ], style={"display": "flex", "gap": "20px", "flexWrap": "wrap",
+                              "marginBottom": "20px"}),
+                ]),
+
+                # Thresholds — P1
+                html.Div([
+                    html.Div("🟠 P1 — moderate (all three must hold simultaneously)",
+                             style={"fontSize": "12px", "fontWeight": 700,
+                                    "color": P1_COLOR, "marginBottom": "10px"}),
+                    html.Div([
+                        _thr_input("p1_prb",   "DL PRB Load > (%)",      _DT["p1_prb"],   40, 99),
+                        _thr_input("p1_thp",   "DL Throughput < (kbps)", _DT["p1_thp"],   100, 50000),
+                        _thr_input("p1_users", "Active Users >",         _DT["p1_users"], 1, 100),
+                    ], style={"display": "flex", "gap": "20px", "flexWrap": "wrap",
+                              "marginBottom": "20px"}),
+                ]),
+
+                # Raw file path + button
+                html.Div([
+                    html.Div([
+                        html.Label("Raw KPI file path", style=_LBL),
+                        dcc.Input(
+                            id="raw-data-path-input",
+                            value=RAW_DATA_PATH, type="text",
+                            placeholder="datasets/final_kpi_data.csv",
+                            style={"fontSize": "12px", "padding": "6px 10px",
+                                   "border": f"1px solid {BORDER_COLOR}",
+                                   "borderRadius": "10px", "width": "320px"},
+                        ),
+                    ]),
+                    html.Div([
+                        html.Label("​", style=_LBL),  # spacer label
+                        html.Button(
+                            "⚙️  Compute & Save",
+                            id="recompute-congestion-btn", n_clicks=0,
+                            style={**_PILL_BTN,
+                                   "background": "#f0fdf4",
+                                   "border": "1px solid #86efac",
+                                   "color": "#15803d",
+                                   "fontWeight": 600,
+                                   "padding": "7px 18px"},
+                        ),
+                    ]),
+                ], style={"display": "flex", "gap": "16px",
+                          "alignItems": "flex-end", "flexWrap": "wrap",
+                          "marginBottom": "12px"}),
+
+                html.Div(id="recompute-status",
+                         style={"fontSize": "13px", "color": TEXT_MUTED,
+                                "fontStyle": "italic"}),
+
+            ], style=SECTION_STYLE),
+
+        ], style={"paddingTop": "20px", "maxWidth": "860px"})]
     )
