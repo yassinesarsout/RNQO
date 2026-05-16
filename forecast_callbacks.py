@@ -17,6 +17,8 @@ Congestion detection (3-KPI AND logic, matches congestion_engine.py):
 
 import os
 import json
+import sys
+import threading
 
 import numpy as np
 import pandas as pd
@@ -24,7 +26,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from dash import (
     Input, Output, State, callback,
-    no_update, html, ctx,
+    no_update, html, ctx, dcc,
 )
 from dash.exceptions import PreventUpdate
 
@@ -111,6 +113,58 @@ def _try_load_xgb():
                 pass
 
 _try_load_xgb()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model retraining — background thread + status
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TRAIN_LOCK   = threading.Lock()
+_TRAIN_STATUS = {"running": False, "message": "Idle", "error": False}
+
+
+def _reload_xgb_models():
+    """Refresh all in-process model dicts from disk without server restart."""
+    _XGB_MODELS.clear()
+    _XGB_SCALERS.clear()
+    _XGB_META.clear()
+    _XGB_FEATURES.clear()
+    _try_load_xgb()
+
+
+def _run_training_thread(data_path: str):
+    """Runs in a daemon thread — trains models, reloads them, updates status."""
+    def _progress(msg: str):
+        with _TRAIN_LOCK:
+            _TRAIN_STATUS["message"] = msg
+
+    # Clear current models so dashboard falls back to lag-blend while training
+    _XGB_MODELS.clear()
+
+    try:
+        # Import train_all from Models/train_xgboost.py
+        if _XGB_DIR not in sys.path:
+            sys.path.insert(0, _XGB_DIR)
+        import importlib
+        tx = importlib.import_module("train_xgboost")
+        importlib.reload(tx)   # pick up any edits since last import
+
+        result = tx.train_all(
+            data_path=data_path,
+            models_dir=_XGB_DIR,
+            progress_cb=_progress,
+        )
+        success = result.startswith("✅")
+        if success:
+            _reload_xgb_models()
+    except Exception as exc:
+        result  = f"❌  Thread error: {exc}"
+        success = False
+
+    with _TRAIN_LOCK:
+        _TRAIN_STATUS["running"] = False
+        _TRAIN_STATUS["message"] = result
+        _TRAIN_STATUS["error"]   = not success
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -965,6 +1019,73 @@ def refresh_cache(n_clicks, prb_thr, usr_thr):
     fc_df.to_csv(_CACHE_PATH, index=False)
     ts = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
     return f"✓ Cached {len(all_cells)} cells · {ts}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Retrain callbacks
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _retrain_status_ui(message: str, running: bool, error: bool):
+    """Build the status div shown in the Settings tab."""
+    if running:
+        color, prefix = "#0369a1", "⏳ "
+    elif error:
+        color, prefix = "#b91c1c", ""
+    else:
+        color, prefix = "#15803d" if message.startswith("✅") else "#64748b", ""
+    return html.Div(prefix + message, style={
+        "fontSize": "12px", "color": color, "fontWeight": 500,
+        "marginTop": "10px", "whiteSpace": "pre-wrap",
+    })
+
+
+@callback(
+    Output("retrain-status",   "children"),
+    Output("retrain-poll",     "disabled"),
+    Input("retrain-models-btn", "n_clicks"),
+    State("train-data-path",   "value"),
+    prevent_initial_call=True,
+)
+def retrain_models(n_clicks, data_path):
+    """Validate input, then kick off a background training thread."""
+    if not n_clicks:
+        raise PreventUpdate
+
+    with _TRAIN_LOCK:
+        if _TRAIN_STATUS["running"]:
+            return _retrain_status_ui("Training already in progress …", True, False), False
+
+    path = (data_path or "").strip()
+    if not path:
+        return _retrain_status_ui("❌  No data file path specified.", False, True), True
+    if not os.path.exists(path):
+        return _retrain_status_ui(f"❌  File not found: {path}", False, True), True
+
+    with _TRAIN_LOCK:
+        _TRAIN_STATUS["running"] = True
+        _TRAIN_STATUS["message"] = "Starting …"
+        _TRAIN_STATUS["error"]   = False
+
+    threading.Thread(target=_run_training_thread, args=(path,), daemon=True).start()
+    return _retrain_status_ui("Starting …", True, False), False   # enable polling
+
+
+@callback(
+    Output("retrain-status", "children", allow_duplicate=True),
+    Output("retrain-poll",   "disabled", allow_duplicate=True),
+    Input("retrain-poll",    "n_intervals"),
+    prevent_initial_call=True,
+)
+def poll_retrain_status(n_intervals):
+    """Read _TRAIN_STATUS every 2s; stop polling when training is done."""
+    with _TRAIN_LOCK:
+        running = _TRAIN_STATUS["running"]
+        message = _TRAIN_STATUS["message"]
+        error   = _TRAIN_STATUS["error"]
+
+    ui = _retrain_status_ui(message, running, error)
+    stop_poll = not running   # disable interval once finished
+    return ui, stop_poll
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ app.title = "RAN KPI Dashboard"
 from layout import build_layout        # noqa: E402
 __import__("callbacks")                # registers existing callbacks
 __import__("forecast_callbacks")       # registers forecast tab callbacks  ← NEW
+__import__("optimizer_callbacks")      # registers optimizer tab callbacks
 
 app.layout = build_layout()
 

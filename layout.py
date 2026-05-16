@@ -26,6 +26,7 @@ from precompute import (
 )
 from map_builder import SITE_POINT_TO_LAYER, SECTOR_STYLE
 from forecast_tab_layout import build_forecast_tab
+from optimizer_tab_layout import build_optimizer_tab
 
 
 # ── Shared label style ─────────────────────────────────────────────────────
@@ -192,6 +193,7 @@ def build_layout():
                 _tab_congestion_analytics(),
                 _tab_geometry_map(),
                 build_forecast_tab(),
+                build_optimizer_tab(), 
                 _tab_settings(),
             ], style={
                 "borderBottom": f"1px solid {BORDER_COLOR}",
@@ -734,6 +736,64 @@ def _tab_settings():
                 html.Div(id="recompute-status",
                          style={"fontSize": "13px", "color": TEXT_MUTED,
                                 "fontStyle": "italic"}),
+
+            ], style=SECTION_STYLE),
+
+            # ── Section 3: Retrain XGBoost models ─────────────────────────
+            html.Div([
+                html.Div([
+                    html.Span("🤖", style={"fontSize": "18px", "marginRight": "10px"}),
+                    html.Span("Retrain Forecast Models",
+                              style={"fontWeight": 700, "fontSize": "15px",
+                                     "color": TEXT_PRIMARY}),
+                ], style={"display": "flex", "alignItems": "center",
+                          "marginBottom": "6px"}),
+                html.P([
+                    "Trains new XGBoost models for all three KPIs (PRB, Active Users, Throughput) "
+                    "from the raw KPI file. Training runs in the background — the dashboard stays "
+                    "live using lag-blend fallback while the new models are being built. "
+                    "Models reload automatically when done; ",
+                    html.Strong("no server restart needed."),
+                    html.Br(),
+                    html.Span("⚠ Training takes several minutes on large datasets. "
+                              "New cells/sites in the data will be learned; "
+                              "cells absent from the training file fall back to lag-blend at inference.",
+                              style={"color": TEXT_MUTED}),
+                ], style={"fontSize": "12px", "color": TEXT_MUTED,
+                          "marginBottom": "18px", "lineHeight": "1.6"}),
+
+                html.Div([
+                    html.Div([
+                        html.Label("Raw KPI file path", style=_LBL),
+                        dcc.Input(
+                            id="train-data-path",
+                            value=RAW_DATA_PATH, type="text",
+                            placeholder="datasets/final_kpi_data.csv",
+                            style={"fontSize": "12px", "padding": "6px 10px",
+                                   "border": f"1px solid {BORDER_COLOR}",
+                                   "borderRadius": "10px", "width": "320px"},
+                        ),
+                    ]),
+                    html.Div([
+                        html.Label("​", style=_LBL),
+                        html.Button(
+                            "🚀  Retrain XGBoost Models",
+                            id="retrain-models-btn", n_clicks=0,
+                            style={**_PILL_BTN,
+                                   "background": "#eff6ff",
+                                   "border": "1px solid #93c5fd",
+                                   "color": "#1d4ed8",
+                                   "fontWeight": 600,
+                                   "padding": "7px 18px"},
+                        ),
+                    ]),
+                ], style={"display": "flex", "gap": "16px",
+                          "alignItems": "flex-end", "flexWrap": "wrap",
+                          "marginBottom": "4px"}),
+
+                html.Div(id="retrain-status"),
+                dcc.Interval(id="retrain-poll", interval=2000, disabled=True,
+                             max_intervals=-1),
 
             ], style=SECTION_STYLE),
 
