@@ -163,11 +163,34 @@ def run_optimization(n_clicks, region, mode, algorithm, fc_store):
             records = (fc_store or {}).get("records", []) if isinstance(fc_store, dict) else []
             if not records:
                 return None, [_badge(
-                    "No forecast data — run AI Forecasting first",
+                    "No forecast data — run AI Forecasting tab first",
                     "#dc2626",
                 )]
+            # Guard: the loaded forecast may have been run on a different
+            # region. Check overlap before we try to optimize.
+            fc_cells = {r.get("Cell Name") for r in records}
+            covered = [c for c in cells if c in fc_cells]
+            coverage_pct = 100.0 * len(covered) / max(len(cells), 1)
+            if not covered:
+                return None, [_badge(
+                    "Loaded forecast covers different cells — "
+                    "re-run AI Forecasting on this region",
+                    "#dc2626",
+                )]
+            if coverage_pct < 50:
+                # Partial coverage — proceed but warn, and only optimize
+                # the cells the forecast actually covers.
+                cells = covered
+                partial_warning = _badge(
+                    f"Forecast covers only {coverage_pct:.0f}% of region — "
+                    f"optimizing {len(covered)} forecasted cells",
+                    "#b45309",
+                )
+            else:
+                partial_warning = None
             state = get_forecasted_state(cells, records, DF)
         else:
+            partial_warning = None
             state = get_current_state(cells, DF)
     except ValueError as e:
         return None, [_badge(str(e)[:80], "#dc2626")]
@@ -198,11 +221,14 @@ def run_optimization(n_clicks, region, mode, algorithm, fc_store):
         f"Done · {result['reduction_pct']}% reduction · {result['runtime_s']:.2f}s",
         "#10b981",
     )
-    return result, [
+    status_children = [
         _badge(f"{result['n_cells']} cells", ACCENT),
         _badge(f"Mode: {'Forecasted' if mode == 'forecasted' else 'Current'}", TEXT_PRIMARY),
         badge,
     ]
+    if mode == "forecasted" and partial_warning is not None:
+        status_children.insert(2, partial_warning)
+    return result, status_children
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -362,50 +388,138 @@ def render_table(result):
                    "color": TEXT_MUTED, "fontSize": "13px"},
         ), ""
 
+    # ── Build a plain-English action sentence for each cell ──────────────────
+    def _action_text(r):
+        parts = []
+        if r["delta_p_db"] > 0:
+            parts.append(f"cut power {int(r['delta_p_db'])} dB")
+        if r["delta_h_db"] > 0:
+            parts.append(f"raise handover margin {int(r['delta_h_db'])} dB")
+        return " + ".join(parts) if parts else "no change"
+
+    _status_label = {
+        "fixed":     "Resolved",
+        "improved":  "Improved",
+        "no-effect": "Still congested",
+        "adjusted":  "Tuned (was healthy)",
+        "unchanged": "No change",
+    }
+
     table_data = [{
-        "Cell":     r["cell_name"],
-        "λ":        r["lambda"],
-        "Λ":        r["Lambda"],
-        "Excess":   r["excess_before"],
-        "Δ℘ dB":    int(r["delta_p_db"]) if r["delta_p_db"] > 0 else None,
-        "Δℏ dB":    int(r["delta_h_db"]) if r["delta_h_db"] > 0 else None,
-        "Offload":  r["total_offload"],
-        "New λ":    r["effective_after"],
-        "Status":   r["status"].upper(),
+        "Cell":        r["cell_name"],
+        "Users now":   r["lambda"],
+        "Capacity":    r["Lambda"],
+        "Over by":     r["excess_before"],
+        "Action":      _action_text(r),
+        "Users moved": r["total_offload"],
+        "Users after": r["effective_after"],
+        "Result":      _status_label.get(r["status"], r["status"].title()),
     } for r in rows]
 
-    return dash_table.DataTable(
+    # ── Legend explaining every column in plain language ─────────────────────
+    legend = html.Div([
+        html.Div("What each column means", style={
+            "fontSize": "11px", "fontWeight": 700, "color": TEXT_PRIMARY,
+            "marginBottom": "8px", "textTransform": "uppercase",
+            "letterSpacing": "0.4px",
+        }),
+        html.Div([
+            html.Div([
+                html.Span("Users now", style={"fontWeight": 600, "color": TEXT_PRIMARY}),
+                html.Span(" — active users on the cell at the optimized moment",
+                          style={"color": TEXT_MUTED}),
+            ]),
+            html.Div([
+                html.Span("Capacity", style={"fontWeight": 600, "color": TEXT_PRIMARY}),
+                html.Span(" — users the cell can serve before hitting the congestion threshold (the model's Λ prediction)",
+                          style={"color": TEXT_MUTED}),
+            ]),
+            html.Div([
+                html.Span("Over by", style={"fontWeight": 600, "color": TEXT_PRIMARY}),
+                html.Span(" — how many users the cell is above its capacity (0 means not congested)",
+                          style={"color": TEXT_MUTED}),
+            ]),
+            html.Div([
+                html.Span("Action", style={"fontWeight": 600, "color": TEXT_PRIMARY}),
+                html.Span(" — what the optimizer recommends. Cutting power shrinks the cell's reach; raising handover margin pushes edge users to neighbors",
+                          style={"color": TEXT_MUTED}),
+            ]),
+            html.Div([
+                html.Span("Users moved", style={"fontWeight": 600, "color": TEXT_PRIMARY}),
+                html.Span(" — how many users get offloaded to neighboring cells as a result",
+                          style={"color": TEXT_MUTED}),
+            ]),
+            html.Div([
+                html.Span("Users after", style={"fontWeight": 600, "color": TEXT_PRIMARY}),
+                html.Span(" — users remaining on the cell once the change is applied",
+                          style={"color": TEXT_MUTED}),
+            ]),
+            html.Div([
+                html.Span("Result", style={"fontWeight": 600, "color": TEXT_PRIMARY}),
+                html.Span(" — Resolved: congestion cleared · Improved: reduced but still over · Still congested: no effect · Tuned: cell was healthy, adjusted to absorb others",
+                          style={"color": TEXT_MUTED}),
+            ]),
+        ], style={"display": "flex", "flexDirection": "column", "gap": "5px",
+                  "fontSize": "11px", "lineHeight": "1.5"}),
+    ], style={
+        "padding": "12px 16px",
+        "background": "#f8fafc",
+        "borderBottom": f"1px solid {BORDER_COLOR}",
+    })
+
+    table = dash_table.DataTable(
         data=table_data,
         columns=[
-            {"name": "Cell",    "id": "Cell"},
-            {"name": "λ",       "id": "λ",       "type": "numeric", "format": {"specifier": ".1f"}},
-            {"name": "Λ",       "id": "Λ",       "type": "numeric", "format": {"specifier": ".0f"}},
-            {"name": "Excess",  "id": "Excess",  "type": "numeric", "format": {"specifier": ".1f"}},
-            {"name": "Δ℘ dB",   "id": "Δ℘ dB"},
-            {"name": "Δℏ dB",   "id": "Δℏ dB"},
-            {"name": "Offload", "id": "Offload", "type": "numeric", "format": {"specifier": ".2f"}},
-            {"name": "New λ",   "id": "New λ",   "type": "numeric", "format": {"specifier": ".1f"}},
-            {"name": "Status",  "id": "Status"},
+            {"name": ["", "Cell"],                       "id": "Cell"},
+            {"name": ["Current state", "Users now"],     "id": "Users now",
+             "type": "numeric", "format": {"specifier": ".1f"}},
+            {"name": ["Current state", "Capacity"],      "id": "Capacity",
+             "type": "numeric", "format": {"specifier": ".0f"}},
+            {"name": ["Current state", "Over by"],       "id": "Over by",
+             "type": "numeric", "format": {"specifier": ".1f"}},
+            {"name": ["Recommended action", "Action"],   "id": "Action"},
+            {"name": ["Predicted outcome", "Users moved"], "id": "Users moved",
+             "type": "numeric", "format": {"specifier": ".2f"}},
+            {"name": ["Predicted outcome", "Users after"], "id": "Users after",
+             "type": "numeric", "format": {"specifier": ".1f"}},
+            {"name": ["Predicted outcome", "Result"],    "id": "Result"},
         ],
-        page_size=18,
+        merge_duplicate_headers=True,
+        page_size=15,
         sort_action="native", filter_action="native",
         style_cell={
-            "padding": "8px 10px", "fontSize": "12px",
+            "padding": "8px 12px", "fontSize": "12px",
             "fontFamily": "'Inter', sans-serif", "textAlign": "left",
             "border": f"1px solid {BORDER_COLOR}",
+            "maxWidth": "200px", "overflow": "hidden",
+            "textOverflow": "ellipsis",
         },
         style_header={
-            "backgroundColor": "#f8fafc", "fontWeight": 600,
-            "fontSize": "11px", "textTransform": "uppercase",
-            "letterSpacing": "0.4px", "color": TEXT_MUTED,
+            "backgroundColor": "#f1f5f9", "fontWeight": 600,
+            "fontSize": "11px", "color": TEXT_PRIMARY,
+            "textAlign": "left",
         },
         style_data_conditional=[
-            {"if": {"filter_query": "{Status} = 'FIXED'"},     "color": "#15803d", "fontWeight": 500},
-            {"if": {"filter_query": "{Status} = 'IMPROVED'"},  "color": "#b45309"},
-            {"if": {"filter_query": "{Status} = 'NO-EFFECT'"}, "color": "#dc2626"},
+            {"if": {"filter_query": "{Result} = 'Resolved'"},
+             "backgroundColor": "#f0fdf4", "color": "#15803d"},
+            {"if": {"filter_query": "{Result} = 'Improved'"},
+             "backgroundColor": "#fffbeb", "color": "#b45309"},
+            {"if": {"filter_query": "{Result} = 'Still congested'"},
+             "backgroundColor": "#fef2f2", "color": "#dc2626"},
+            {"if": {"column_id": "Action"},
+             "fontStyle": "italic", "color": ACCENT},
         ],
-        style_table={"overflowY": "auto", "maxHeight": "520px"},
-    ), f"{len(rows)} cells"
+        style_cell_conditional=[
+            {"if": {"column_id": "Cell"}, "fontFamily": "monospace",
+             "fontSize": "11px"},
+            {"if": {"column_id": "Action"}, "minWidth": "180px"},
+        ],
+        style_table={"overflowY": "auto", "maxHeight": "440px"},
+        tooltip_delay=0,
+        tooltip_duration=None,
+    )
+
+    return html.Div([legend, table]), f"{len(rows)} cells changed"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
