@@ -12,9 +12,14 @@ The dashboard is split across these modules:
   ui_components.py      — HTML card & side panel builders
   layout.py             — full Dash layout definition
   callbacks.py          — existing @callback-decorated functions
-  forecast_tab_layout.py — 🔮 AI Forecasting tab layout
-  forecast_callbacks.py  — 🔮 AI Forecasting tab callbacks
+  forecast_tab_layout.py — AI Forecasting tab layout
+  forecast_callbacks.py  — AI Forecasting tab callbacks
 """
+
+
+
+
+
 
 from dash import Dash
 
@@ -31,7 +36,7 @@ app.title = "RAN KPI Dashboard"
 
 from layout import build_layout        # noqa: E402
 __import__("callbacks")                # registers existing callbacks
-__import__("forecast_callbacks")       # registers forecast tab callbacks  ← NEW
+__import__("forecast_callbacks")       # registers forecast tab callbacks  
 __import__("optimizer_callbacks")      # registers optimizer tab callbacks
 
 app.layout = build_layout()

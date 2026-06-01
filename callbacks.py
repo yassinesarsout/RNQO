@@ -57,7 +57,7 @@ def _cl(**extra) -> dict:
                           "bordercolor": "#e2e8f0", "borderwidth": 1,
                           "font": {"size": 11}},
         "hoverlabel":    {"bgcolor": "white", "bordercolor": "#e2e8f0",
-                          "font": {"family": _FONT, "size": 12}},
+                          "font": {"family": _FONT, "size": 12, "color": "#334155"}},
         "title":         {"font": {"size": 14, "color": "#0f172a", "family": _FONT},
                           "x": 0.02, "xanchor": "left"},
     }

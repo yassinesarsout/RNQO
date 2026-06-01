@@ -10,7 +10,7 @@ Changes (v2):
 """
 
 from dash import dcc, html, dash_table
-from config import SECTION_STYLE, _PILL_BTN, _PRIMARY_BTN, TABLE_PAGE_SIZE
+from config import SECTION_STYLE, _PILL_BTN, _PRIMARY_BTN, TABLE_PAGE_SIZE, _TAB_SELECTED, _TAB_STYLE
 
 _ACCENT      = "#6366f1"
 _ACCENT_SOFT = "#eef2ff"
@@ -76,7 +76,7 @@ def _loading(child_id, child, spinner_type="dot", color=_ACCENT, height=None):
 
 
 def build_forecast_tab():
-    return dcc.Tab(label="🔮 AI Forecasting", children=[
+    return dcc.Tab(label="🔮 AI Forecasting", style=_TAB_STYLE, selected_style=_TAB_SELECTED, children=[
         html.Div([
 
             # ── Header ──────────────────────────────────────────────────────

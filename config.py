@@ -117,7 +117,7 @@ _ACCENT_BTN = {
 }
 
 _TAB_STYLE = {
-    "padding": "10px 22px",
+    "padding": "25px 22px",
     "fontWeight": 500, "fontSize": "13px",
     "color": TEXT_MUTED,
     "border": "none",
