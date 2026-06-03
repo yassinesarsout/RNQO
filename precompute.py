@@ -3,6 +3,7 @@ Module-level data loading and precomputation (runs once at import time).
 
 KPI side:
   DF, LOAD_ERROR, NUMERIC_COLS, KPI_OPTIONS, DATE_MIN, DATE_MAX
+  CELL_SUMMARY_DF  — pre-built cell-level congestion summary (one row per cell)
   get_filtered_df()
 
 Geo side:
@@ -50,6 +51,53 @@ _has_time = not DF.empty and "Time" in DF.columns and DF["Time"].notna().any()
 DATE_MIN    = DF["Time"].min().date().isoformat()                    if _has_time else None
 DATE_MAX    = DF["Time"].max().date().isoformat()                    if _has_time else None
 DATE_SECOND = (DF["Time"].min().date() + _td(days=1)).isoformat()   if _has_time else None
+
+
+# ============================================================
+# Load cell-level congestion summary
+# ============================================================
+# Priority 1: load the pre-built CSV produced by the congestion engine.
+# Priority 2: derive on-the-fly from DF (slower but always available).
+# The summary is used by the Congestion tab table — one row per cell,
+# no date/time dimension — so it is far faster to join against than
+# scanning millions of hourly rows each callback.
+
+_SUMMARY_PATH = "datasets/cell_congestion_summary.csv"
+
+
+def _build_cell_summary_from_df(df):
+    """Fallback: group DF into a per-cell summary when the pre-built CSV is absent."""
+    import pandas as _pd
+    if df.empty or "Cell Name" not in df.columns:
+        return _pd.DataFrame()
+    meta_cols = [c for c in ["Region", "Radio Site", "Cell FDD TDD Indication"]
+                 if c in df.columns]
+    kpi_cols  = [c for c in ["DL PRB Load", "Active Users",
+                              "LTE DL User Throughput", "DL Avg Throughput"]
+                 if c in df.columns]
+    agg_dict  = {c: "first" for c in meta_cols}
+    agg_dict.update({c: "mean" for c in kpi_cols})
+    summary = df.groupby("Cell Name", as_index=False).agg(agg_dict)
+    for c in kpi_cols:
+        if c in summary.columns:
+            summary[c] = summary[c].round(2)
+    for col in ["FinalCongestionScore", "CongestionLevel",
+                "DaysObserved", "DaysP0", "DaysP1",
+                "MaxConsecutiveCongestedDays", "WeeksP0", "WeeksP1"]:
+        if col in df.columns:
+            extra = df.groupby("Cell Name")[col].first().reset_index()
+            summary = summary.merge(extra, on="Cell Name", how="left")
+    return summary
+
+
+try:
+    from pathlib import Path as _Path2
+    if _Path2(_SUMMARY_PATH).exists():
+        CELL_SUMMARY_DF = pd.read_csv(_SUMMARY_PATH, low_memory=False)
+    else:
+        CELL_SUMMARY_DF = _build_cell_summary_from_df(DF)
+except Exception:
+    CELL_SUMMARY_DF = _build_cell_summary_from_df(DF)
 
 
 # ============================================================

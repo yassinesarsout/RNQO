@@ -8,6 +8,19 @@ compute_congestion(df, thresholds=None) -> dict
     {"kpi_df": pd.DataFrame, "busy_hours": pd.DataFrame, "cell_summary": pd.DataFrame}
 run_and_save(raw_path, *, output_kpi, output_busy, output_summary, thresholds=None) -> str
     status message
+
+Congestion persistence rule (v2)
+---------------------------------
+A cell earns a CongestionLevel of P0 or P1 only when the hourly flags show
+congestion on **≥ MIN_CONGESTED_DAYS_PER_WEEK distinct days-of-week** AND
+that weekly pattern repeats across **≥ MIN_CONGESTED_WEEKS calendar weeks**.
+
+Defaults:  MIN_CONGESTED_DAYS_PER_WEEK = 4,  MIN_CONGESTED_WEEKS = 3
+(i.e. 4 days/week × 3 weeks).
+
+Hourly P0_Congestion / P1_Congestion flags are kept as-is — they reflect
+raw threshold crossings. Only the cell-level CongestionLevel verdict in the
+summary (and the column merged back into kpi_df) is affected by this rule.
 """
 
 from __future__ import annotations
@@ -24,6 +37,10 @@ COL_USERS = "Active Users"
 COL_THP   = "LTE DL User Throughput"
 
 REQUIRED_COLS = [COL_TIME, COL_CELL, COL_PRB, COL_USERS, COL_THP]
+
+# ── Persistence thresholds (new rule) ─────────────────────────────────────────
+MIN_CONGESTED_DAYS_PER_WEEK = 4   # distinct days-of-week in a single ISO week
+MIN_CONGESTED_WEEKS         = 3   # calendar weeks that must show that pattern
 
 # ── Defaults (matching the original congestion.py) ────────────────────────────
 DEFAULT_THRESHOLDS: dict = {
@@ -60,10 +77,95 @@ def _max_consecutive_days(date_series: pd.Series) -> int:
     return int(best)
 
 
+def _weeks_meeting_day_threshold(
+    cong_dates: pd.Series,
+    min_days: int = MIN_CONGESTED_DAYS_PER_WEEK,
+) -> int:
+    """
+    Count how many ISO calendar weeks contain ≥ min_days distinct
+    congested days-of-week.
+
+    Parameters
+    ----------
+    cong_dates : Series of date strings or date objects  (days when congestion occurred)
+    min_days   : minimum distinct days-of-week required per week
+
+    Returns
+    -------
+    int — number of qualifying weeks
+    """
+    if cong_dates.empty:
+        return 0
+    dt = pd.to_datetime(cong_dates).dt.normalize()
+    # ISO week key = (year, week_number)
+    week_keys = dt.dt.isocalendar()[["year", "week"]].apply(
+        lambda r: (int(r["year"]), int(r["week"])), axis=1
+    )
+    # For each week, count distinct days-of-week
+    qualifying = 0
+    for _wk, group in dt.groupby(week_keys):
+        if group.dt.dayofweek.nunique() >= min_days:
+            qualifying += 1
+    return qualifying
+
+
+def _congestion_level_from_persistence(
+    busy_df: pd.DataFrame,
+    min_days: int = MIN_CONGESTED_DAYS_PER_WEEK,
+    min_weeks: int = MIN_CONGESTED_WEEKS,
+) -> pd.Series:
+    """
+    For each cell, apply the persistence rule and return a Series of
+    CongestionLevel values ("P0", "P1", or "None") indexed by cell name.
+
+    Rule:
+      • Candidate level = P0 if the cell has any P0 busy-hour days,
+        P1 if it has P1 days (and no P0 ones that survive).
+      • A cell reaches that level only when, for its candidate level,
+        the qualifying-weeks count ≥ min_weeks.
+      • P0 is checked first; if it qualifies → P0, else fall through to P1.
+    """
+    records = []
+    for cell_name, grp in busy_df.groupby(COL_CELL):
+        p0_dates = grp.loc[grp["BusyHour_P0"] == True, "Date"]
+        p1_dates = grp.loc[grp["BusyHour_P1"] == True, "Date"]
+
+        p0_weeks = _weeks_meeting_day_threshold(p0_dates, min_days)
+        p1_weeks = _weeks_meeting_day_threshold(p1_dates, min_days)
+
+        if p0_weeks >= min_weeks:
+            level = "P0"
+        elif p1_weeks >= min_weeks:
+            level = "P1"
+        else:
+            level = "None"
+
+        records.append({
+            COL_CELL:             cell_name,
+            "CongestionLevel":    level,
+            "WeeksP0":            p0_weeks,
+            "WeeksP1":            p1_weeks,
+        })
+
+    result = pd.DataFrame(records)
+    if result.empty:
+        return pd.Series(dtype=str)
+    return result.set_index(COL_CELL)
+
+
 # ── Core engine ───────────────────────────────────────────────────────────────
 
-def _compute_summary_from_busy(busy_df: pd.DataFrame) -> pd.DataFrame:
-    """Derive cell_summary from the busy_hours DataFrame (full or partial)."""
+def _compute_summary_from_busy(
+    busy_df: pd.DataFrame,
+    min_days: int = MIN_CONGESTED_DAYS_PER_WEEK,
+    min_weeks: int = MIN_CONGESTED_WEEKS,
+) -> pd.DataFrame:
+    """Derive cell_summary from the busy_hours DataFrame (full or partial).
+
+    The CongestionLevel column now uses the persistence rule:
+    ≥ min_days congested days-of-week per calendar week, repeated across
+    ≥ min_weeks calendar weeks.
+    """
     cell_day = busy_df[[COL_CELL, "Date", "BusyHour_Score_0_1", "BusyHour_Score",
                          "BusyHour_P0", "BusyHour_P1"]].copy()
     summary = (
@@ -94,10 +196,24 @@ def _compute_summary_from_busy(busy_df: pd.DataFrame) -> pd.DataFrame:
         pd.DataFrame(streaks, columns=[COL_CELL, "MaxConsecutiveCongestedDays"]),
         on=COL_CELL, how="left",
     )
-    summary["CongestionLevel"] = summary.apply(
-        lambda r: "P0" if r["DaysP0"] > 0 else ("P1" if r["DaysP1"] > 0 else "None"),
-        axis=1,
-    )
+
+    # ── Apply persistence rule for CongestionLevel ────────────────────────────
+    persistence = _congestion_level_from_persistence(busy_df, min_days, min_weeks)
+    if not persistence.empty:
+        summary["CongestionLevel"] = summary[COL_CELL].map(
+            persistence["CongestionLevel"]
+        ).fillna("None")
+        summary["WeeksP0"] = summary[COL_CELL].map(
+            persistence.get("WeeksP0", pd.Series(dtype=int))
+        ).fillna(0).astype(int)
+        summary["WeeksP1"] = summary[COL_CELL].map(
+            persistence.get("WeeksP1", pd.Series(dtype=int))
+        ).fillna(0).astype(int)
+    else:
+        summary["CongestionLevel"] = "None"
+        summary["WeeksP0"] = 0
+        summary["WeeksP1"] = 0
+
     return summary
 
 
@@ -173,7 +289,7 @@ def compute_congestion(
     busy["BusyHour_P0"]    = busy["P0_Congestion"]
     busy["BusyHour_P1"]    = busy["P1_Congestion"]
 
-    # ── Cell summary ──────────────────────────────────────────────────────────
+    # ── Cell summary (with persistence rule) ──────────────────────────────────
     summary = _compute_summary_from_busy(busy)
 
     # ── Merge busy-hour columns back to hourly rows ───────────────────────────
@@ -185,7 +301,8 @@ def compute_congestion(
 
     df = df.merge(
         summary[[COL_CELL, "FinalCongestionScore", "CongestionLevel",
-                 "DaysObserved", "DaysP0", "DaysP1", "MaxConsecutiveCongestedDays"]],
+                 "DaysObserved", "DaysP0", "DaysP1", "MaxConsecutiveCongestedDays",
+                 "WeeksP0", "WeeksP1"]],
         on=COL_CELL, how="left",
     )
 

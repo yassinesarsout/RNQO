@@ -25,7 +25,7 @@ from config import RAW_DATA_PATH as _RAW_DATA_PATH
 from data_utils import categorical_options, downsample, make_empty_figure, numeric_columns
 from geo_utils import split_site_key, point_in_polygon
 from precompute import (
-    DF, CELL_GEO_META, SITE_SUMMARY,
+    DF, CELL_GEO_META, SITE_SUMMARY, CELL_SUMMARY_DF,
     get_filtered_df, get_geo_visible_cells, get_cell_congestion_lookup,
     _df_filter_cache,
 )
@@ -1024,26 +1024,75 @@ def update_dashboard(
             annotation_font_color="#f97316",
         )
 
-    # Congestion table
-    cong_cols = [c for c in [
-        "Time", "Region", "Radio Site", "Cell Name",
-        "DL PRB Load", "Active Users", "LTE DL User Throughput", "DL Avg Throughput",
-        "P0_Congestion", "P1_Congestion",
-        "CongestionLevelHour", "Hourly_Congestion_Score_0_1", "Hourly_Congestion_Score",
-        "BusyHour", "BusyHour_Score", "BusyHour_Level", "IsBusyHourRow",
-        "FinalCongestionScore", "CongestionLevel",
-        "DaysObserved", "DaysP0", "DaysP1", "MaxConsecutiveCongestedDays",
-    ] if c in filtered.columns]
-
-    if has_p0 and has_p1:
-        mask = (filtered["P0_Congestion"] == True) | (filtered["P1_Congestion"] == True)
-        cong_table_df = filtered[mask][cong_cols].copy().head(5000)
-    elif has_p1:
-        cong_table_df = filtered[filtered["P1_Congestion"] == True][cong_cols].copy().head(5000)
-    elif has_p0:
-        cong_table_df = filtered[filtered["P0_Congestion"] == True][cong_cols].copy().head(5000)
+    # ── Congestion table: one row per cell (summary, not hourly rows) ──────────
+    # Strategy: join CELL_SUMMARY_DF (pre-built, one row per cell) against the
+    # cells actually visible in the current filter.  This is O(cells) rather
+    # than O(millions of rows), and the table is far more useful for operators.
+    _visible_cells = (
+        filtered["Cell Name"].dropna().unique().tolist()
+        if not filtered.empty and "Cell Name" in filtered.columns
+        else []
+    )
+    if not CELL_SUMMARY_DF.empty and _visible_cells and "Cell Name" in CELL_SUMMARY_DF.columns:
+        cong_table_df = CELL_SUMMARY_DF[
+            CELL_SUMMARY_DF["Cell Name"].isin(_visible_cells)
+        ].copy()
+        # Keep only congested cells (CongestionLevel != None/Not Congested) when
+        # summary data is available; fall back to all visible cells otherwise.
+        _level_col = "CongestionLevel" if "CongestionLevel" in cong_table_df.columns else None
+        if _level_col and cong_table_df[_level_col].isin(["P0", "P1"]).any():
+            cong_table_df = cong_table_df[cong_table_df[_level_col].isin(["P0", "P1"])]
+        # Select useful columns (keep whatever the summary file actually has)
+        _summary_cols = [c for c in [
+            "Cell Name", "Region", "Radio Site", "Cell FDD TDD Indication",
+            "CongestionLevel",
+            "DaysObserved", "DaysP0", "DaysP1",
+            "WeeksP0", "WeeksP1",
+            "MaxConsecutiveCongestedDays",
+            "FinalCongestionScore",
+            "AvgBusyHourScore", "MaxBusyHourScore",
+            "PersistenceRatio",
+            "DL PRB Load", "Active Users",
+            "LTE DL User Throughput", "DL Avg Throughput",
+        ] if c in cong_table_df.columns]
+        cong_table_df = cong_table_df[_summary_cols].sort_values(
+            "FinalCongestionScore" if "FinalCongestionScore" in _summary_cols else "Cell Name",
+            ascending=False,
+        ).reset_index(drop=True)
     else:
-        cong_table_df = filtered[cong_cols].copy().head(5000)
+        # Fallback: derive summary on-the-fly from filtered hourly data
+        if not filtered.empty and "Cell Name" in filtered.columns:
+            _agg: dict = {}
+            for _c in ["Region", "Radio Site"]:
+                if _c in filtered.columns:
+                    _agg[_c] = ("first", _c)
+            _num_agg = {c: c for c in ["DL PRB Load", "Active Users",
+                                        "LTE DL User Throughput", "DL Avg Throughput"]
+                        if c in filtered.columns}
+            _grp = filtered.groupby("Cell Name", as_index=False)
+            _parts = []
+            _meta_cols = [c for c in ["Region", "Radio Site", "Cell FDD TDD Indication"]
+                          if c in filtered.columns]
+            _kpi_cols  = [c for c in ["DL PRB Load", "Active Users",
+                                       "LTE DL User Throughput", "DL Avg Throughput"]
+                          if c in filtered.columns]
+            _meta_df = filtered.groupby("Cell Name")[_meta_cols].first().reset_index() if _meta_cols else filtered[["Cell Name"]].drop_duplicates()
+            _kpi_df  = filtered.groupby("Cell Name")[_kpi_cols].mean().round(2).reset_index() if _kpi_cols else None
+            cong_table_df = _meta_df
+            if _kpi_df is not None:
+                cong_table_df = cong_table_df.merge(_kpi_df, on="Cell Name", how="left")
+            for _col in ["FinalCongestionScore", "CongestionLevel",
+                          "DaysObserved", "DaysP0", "DaysP1",
+                          "MaxConsecutiveCongestedDays", "WeeksP0", "WeeksP1"]:
+                if _col in filtered.columns:
+                    _extra = filtered.groupby("Cell Name")[_col].first().reset_index()
+                    cong_table_df = cong_table_df.merge(_extra, on="Cell Name", how="left")
+            if "CongestionLevel" in cong_table_df.columns:
+                cong_table_df = cong_table_df[
+                    cong_table_df["CongestionLevel"].isin(["P0", "P1"])
+                ]
+        else:
+            cong_table_df = pd.DataFrame()
 
     return (
         cards, fig_time, fig_time_2, fig_time_3, fig_hist, fig_top, fig_scatter, fig_corr,

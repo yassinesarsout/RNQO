@@ -374,9 +374,14 @@ def _tab_congestion_analytics():
             html.Div([
                 html.Div([
                     html.Span("🔥", style={"fontSize": "15px", "marginRight": "8px"}),
-                    html.Span("Congested Rows (P0 or P1)",
+                    html.Span("Congested Cells — Summary",
                               style={"fontWeight": 700, "fontSize": "14px",
                                      "color": TEXT_PRIMARY}),
+                    html.Span(
+                        " · one row per cell · sorted by FinalCongestionScore",
+                        style={"fontSize": "11px", "color": TEXT_MUTED,
+                               "marginLeft": "8px"},
+                    ),
                 ], style={"display": "flex", "alignItems": "center",
                           "marginBottom": "12px"}),
                 dash_table.DataTable(
@@ -394,10 +399,12 @@ def _tab_congestion_analytics():
                                   "borderBottom": f"2px solid {BORDER_COLOR}"},
                     style_data={"borderBottom": f"1px solid #f1f5f9"},
                     style_data_conditional=[
-                        {"if": {"filter_query": "{P0_Congestion} = true"},
-                         "backgroundColor": "#fff1f2", "color": "#9f1239"},
-                        {"if": {"filter_query": "{P1_Congestion} = true"},
-                         "backgroundColor": "#fff7ed", "color": "#9a3412"},
+                        {"if": {"filter_query": '{CongestionLevel} = "P0"'},
+                         "backgroundColor": "#fff1f2", "color": "#9f1239",
+                         "fontWeight": 600},
+                        {"if": {"filter_query": '{CongestionLevel} = "P1"'},
+                         "backgroundColor": "#fff7ed", "color": "#9a3412",
+                         "fontWeight": 600},
                         {"if": {"row_index": "odd"}, "backgroundColor": "#fafbff"},
                     ],
                 ),
