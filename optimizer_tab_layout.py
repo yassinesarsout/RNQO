@@ -959,6 +959,8 @@ def build_optimizer_tab() -> dcc.Tab:
 
             # Hidden store for missing-freq results
             dcc.Store(id="mfa-results-store", data=None),
+            # Holds exactly what the table shows — used by the export button
+            dcc.Store(id="mfa-table-store", data=[]),
 
             # ── Hidden stores ─────────────────────────────────────────────────
             dcc.Store(id="rfa-results-store", data=None),

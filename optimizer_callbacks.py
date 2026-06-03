@@ -1854,6 +1854,7 @@ def mfa_update_completeness(store):
 @callback(
     Output("mfa-table-wrap",   "children"),
     Output("mfa-table-count",  "children"),
+    Output("mfa-table-store",  "data"),
     Input("mfa-results-store", "data"),
 )
 def mfa_update_table(store):
@@ -1866,13 +1867,13 @@ def mfa_update_table(store):
     )
 
     if not store:
-        return empty_msg, ""
+        return empty_msg, "", []
     if "error" in store:
         return html.Div(store["error"],
                         style={"padding": "16px", "color": "#dc2626",
-                               "fontSize": "13px"}), ""
+                               "fontSize": "13px"}), "", []
     if not store.get("sectors"):
-        return empty_msg, ""
+        return empty_msg, "", []
 
     secs = store["sectors"]
     # Only keep sectors that are actually missing something
@@ -1883,7 +1884,7 @@ def mfa_update_table(store):
             "✅  Every sector in the current filter has all three main bands deployed.",
             style={"padding": "20px", "color": "#15803d",
                    "fontWeight": 600, "fontSize": "13px"},
-        ), "0 gaps"
+        ), "0 gaps", []
 
     table_data = []
     for s in sorted(rows_with_missing,
@@ -1950,36 +1951,20 @@ def mfa_update_table(store):
         f"with missing bands · "
         f"{sum(r['# Missing'] for r in table_data)} total gaps"
     )
-    return table, count_label
+    return table, count_label, table_data
 
 
 # ── MFA CALLBACK 7: CSV export ────────────────────────────────────────────────
 @callback(
-    Output("mfa-download",     "data"),
-    Input("mfa-export-btn",    "n_clicks"),
-    State("mfa-results-store", "data"),
+    Output("mfa-download",    "data"),
+    Input("mfa-export-btn",   "n_clicks"),
+    State("mfa-table-store",  "data"),
     prevent_initial_call=True,
 )
-def mfa_export_csv(n_clicks, store):
-    if not store or not store.get("sectors"):
+def mfa_export_csv(n_clicks, table_data):
+    if not table_data:
         raise PreventUpdate
-
-    secs = store["sectors"]
-    rows = []
-    for s in secs:
-        for band in _MFA_BANDS:
-            rows.append({
-                "Region":          s["region"],
-                "Site":            s["site"],
-                "Site Key":        s["site_key"],
-                "Sector Az (deg)": int(s["sector_az"]),
-                "Band (MHz)":      band,
-                "Status":          "Present" if band in s["present_bands"] else "Missing",
-                "Cells in Sector": "; ".join(s["cell_names"]),
-                "N Cells":         s["n_cells"],
-            })
-
-    export_df = pd.DataFrame(rows)
+    export_df = pd.DataFrame(table_data)
     return dcc.send_data_frame(
         export_df.to_csv,
         "missing_frequency_analysis.csv",
