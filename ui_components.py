@@ -124,7 +124,6 @@ def build_congestion_cards(df: pd.DataFrame) -> list:
         ("P0 Cells",      f"{p0c:,}",  P0_COLOR,   p0c  / total_cells,  "📵"),
         ("P1 Cells",      f"{p1c:,}",  P1_COLOR,   p1c  / total_cells,  "📶"),
         ("Avg Score",     avg_score,   ACCENT,     None,                 "🎯"),
-        ("Busy-Hour Rows",f"{busy:,}", "#0ea5e9",  busy / total_rows,   "⏱️"),
     ]
     cards = []
     for label, value, color, ratio, icon in specs:
