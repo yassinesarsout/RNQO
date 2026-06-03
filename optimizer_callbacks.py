@@ -1254,55 +1254,6 @@ def rfa_update_topology(result):
     return _build_topology_panel(result)
 
 
-# ── RFA CALLBACK 5: three priority tab panels + count label ──────────────────
-@callback(
-    Output("rfa-panel-short",  "children"),
-    Output("rfa-panel-medium", "children"),
-    Output("rfa-panel-long",   "children"),
-    Output("rfa-rec-count",    "children"),
-    Output("rfa-export-bar",   "children"),
-    Input("rfa-results-store", "data"),
-)
-def rfa_update_recommendations(result):
-    empty_panel = html.Div(
-        "Run the analysis to see recommendations.",
-        style={"color": TEXT_MUTED, "fontSize": "13px",
-               "padding": "18px 20px", "fontStyle": "italic"},
-    )
-    if not result:
-        return empty_panel, empty_panel, empty_panel, "", html.Div()
-
-    recs  = result.get("recommendations", [])
-    n     = len(recs)
-    count = f"{n} recommendation{'s' if n != 1 else ''}"
-
-    n_short  = sum(1 for r in recs if r.get("priority") == "short")
-    n_medium = sum(1 for r in recs if r.get("priority") == "medium")
-    n_long   = sum(1 for r in recs if r.get("priority") == "long")
-
-    # Update tab labels with counts — done via children of the panels,
-    # tabs themselves are static in layout; count shown in header instead.
-    count_full = (
-        f"{n} total  ·  "
-        f"🟢 {n_short} short  ·  "
-        f"🟡 {n_medium} medium  ·  "
-        f"🔴 {n_long} long"
-    )
-
-    short_panel  = _build_priority_panel(recs, "short")
-    medium_panel = _build_priority_panel(recs, "medium")
-    long_panel   = _build_priority_panel(recs, "long")
-
-    export_bar = html.Div(
-        html.Span(
-            f"🟢 {n_short}  🟡 {n_medium}  🔴 {n_long}",
-            style={"fontSize": "11px", "color": TEXT_MUTED, "fontWeight": 500},
-        )
-    )
-
-    return short_panel, medium_panel, long_panel, count_full, export_bar
-
-
 # ── RFA CALLBACK 6: recovery chart ───────────────────────────────────────────
 @callback(
     Output("rfa-recovery-chart", "figure"),
@@ -1323,3 +1274,858 @@ def rfa_update_recovery_chart(result):
         )
         return fig
     return _build_recovery_chart(result)
+
+
+# =============================================================================
+# MISSING FREQUENCY ANALYSIS CALLBACKS
+# =============================================================================
+#
+# Scans every sector in the current global filter and flags which of the
+# three main bands (800 MHz, 1800 MHz, 2100 MHz) are absent.
+# TDD is intentionally excluded as requested.
+#
+# Data model
+# ----------
+# The analysis works entirely from CELL_GEO_META which already stores the
+# "frequency" field for each cell, plus the site / region metadata merged in
+# from the KPI DataFrame during precompute.
+#
+# A "sector" is the group of cells that share the same (site_key, azimuth±30°)
+# — identical to what cluster_analyzer._build_topology() does so the results
+# are consistent with the RF Cluster Analysis above.
+#
+# Output: list of dicts, one row per (region, site, sector_az, missing_band)
+
+_MFA_BANDS = ["800", "1800", "2100"]   # TDD intentionally excluded
+
+_MFA_BAND_COLORS = {
+    "800":  "#6366f1",   # indigo
+    "1800": "#f59e0b",   # amber
+    "2100": "#ef4444",   # red
+}
+
+_MFA_FONT = "'Inter', 'Segoe UI', system-ui, sans-serif"
+
+
+def _mfa_normalize_freq(raw: str) -> str | None:
+    """
+    Normalise a raw frequency string to the canonical band key used by
+    cluster_analyzer._engine_add_band — i.e. the same lowercase value that
+    is stored in CELL_GEO_META["frequency"].
+
+    Returns one of: "800", "1800", "2100", "tdd", or None (unknown/empty).
+    This mirrors exactly what _engine_add_band does:
+        present_bands = {info["frequency"].lower() for info in cells.values()
+                         if info["frequency"]}
+    and then checks  `if band not in present_bands`  against _ALL_BANDS.
+    """
+    s = str(raw).strip().lower()
+    if not s or s in ("nan", "none", "unknown", ""):
+        return None
+    # Accept the exact forms cluster_analyzer expects
+    if s == "800":
+        return "800"
+    if s == "1800":
+        return "1800"
+    if s == "2100":
+        return "2100"
+    if s in ("tdd", "td", "2600", "tdd2600"):
+        return "tdd"
+    # Some datasets store numeric MHz as floats, e.g. "800.0"
+    try:
+        mhz = int(float(s))
+        if mhz == 800:   return "800"
+        if mhz == 1800:  return "1800"
+        if mhz == 2100:  return "2100"
+        if mhz == 2600:  return "tdd"
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _mfa_group_sectors(cell_list: list[str]) -> list[dict]:
+    """
+    Group cells into sectors by (site_key, azimuth bucket ±_SECTOR_AZ_TOL°) —
+    identical bucketing logic to cluster_analyzer._build_topology — then
+    determine present/missing bands exactly as _engine_add_band does:
+
+        present_bands = {info["frequency"].lower() for info in cells.values()
+                         if info["frequency"]}
+
+    Missing bands are reported against _MFA_BANDS (800 / 1800 / 2100 — TDD
+    excluded by the caller's _MFA_BANDS definition).
+    """
+    from collections import defaultdict
+    # Import the same azimuth tolerance used by cluster_analyzer so bucketing
+    # is perfectly consistent.
+    from cluster_analyzer import _az_diff as _ca_az_diff, _SECTOR_AZ_TOL
+
+    # Group by site first
+    by_site: dict[str, list[str]] = defaultdict(list)
+    for cn in cell_list:
+        if cn in CELL_GEO_META:
+            by_site[CELL_GEO_META[cn]["site_key"]].append(cn)
+
+    sectors = []
+    for sk, cells in by_site.items():
+        meta0  = CELL_GEO_META[cells[0]]
+        region = meta0["region"]
+        site   = meta0["site"]
+
+        # ── Azimuth bucketing — identical to _build_topology ─────────────────
+        assigned: dict[str, int] = {}
+        sector_azs: list[float] = []
+
+        for cn in sorted(cells):
+            az      = CELL_GEO_META[cn]["azimuth"]
+            matched = None
+            for sid, saz in enumerate(sector_azs):
+                if _ca_az_diff(az, saz) <= _SECTOR_AZ_TOL:
+                    matched = sid
+                    break
+            if matched is None:
+                matched = len(sector_azs)
+                sector_azs.append(az)
+            assigned[cn] = matched
+
+        # ── Group cells by sector ─────────────────────────────────────────────
+        by_sector: dict[int, list[str]] = defaultdict(list)
+        for cn, sid in assigned.items():
+            by_sector[sid].append(cn)
+
+        # ── Determine present/missing bands per sector ───────────────────────
+        for sid, sec_cells in by_sector.items():
+            # Each cell in this sector carries exactly one frequency.
+            # We only track _MFA_BANDS (800 / 1800 / 2100).
+            # TDD cells normalise to "tdd" which is not in _MFA_BANDS, so
+            # they are silently skipped — they contribute neither to present
+            # nor to missing.
+            present = set()
+            for cn in sec_cells:
+                raw  = str(CELL_GEO_META[cn].get("frequency", "")).strip()
+                norm = _mfa_normalize_freq(raw)
+                if norm in _MFA_BANDS:   # only 800 / 1800 / 2100
+                    present.add(norm)
+
+            # Pure-TDD sector — no tracked bands at all, skip entirely.
+            if not present:
+                continue
+
+            # Missing = tracked bands absent from this sector.
+            missing = [b for b in _MFA_BANDS if b not in present]
+
+            sectors.append({
+                "region":        region,
+                "site":          site,
+                "site_key":      sk,
+                "sector_az":     round(sector_azs[sid], 0),
+                "present_bands": sorted(present),   # only 800/1800/2100
+                "missing_bands": missing,
+                "cell_names":    sorted(sec_cells),
+                "n_cells":       len(sec_cells),
+            })
+
+    return sectors
+
+
+def _mfa_empty_fig(msg: str = "Click 'Scan Missing Frequencies' to run") -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(text=msg, x=0.5, y=0.5,
+                       xref="paper", yref="paper",
+                       showarrow=False,
+                       font={"size": 13, "color": TEXT_MUTED})
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis={"visible": False}, yaxis={"visible": False},
+        margin={"t": 10, "b": 10, "l": 10, "r": 10},
+        height=280,
+    )
+    return fig
+
+
+def _mfa_stat_card(icon: str, label: str, value,
+                   color: str = TEXT_PRIMARY) -> html.Div:
+    return html.Div([
+        html.Div([
+            html.Span(icon, style={"fontSize": "16px", "marginRight": "6px"}),
+            html.Span(label, style={
+                "fontSize": "10px", "fontWeight": 600, "color": TEXT_MUTED,
+                "textTransform": "uppercase", "letterSpacing": "0.4px",
+            }),
+        ], style={"display": "flex", "alignItems": "center", "marginBottom": "8px"}),
+        html.Div(str(value), style={
+            "fontSize": "22px", "fontWeight": 700, "color": color,
+        }),
+    ], style={
+        "padding": "12px 16px",
+        "background": SURFACE,
+        "borderRadius": "12px",
+        "border": f"1px solid {BORDER_COLOR}",
+    })
+
+
+# ── MFA CALLBACK 1: run the scan ─────────────────────────────────────────────
+@callback(
+    Output("mfa-results-store", "data"),
+    Input("mfa-run-btn",        "n_clicks"),
+    State("mfa-scope",          "value"),
+    State("region-filter",      "value"),
+    State("site-filter",        "value"),
+    State("cell-filter",        "value"),
+    State("mode-filter",        "value"),
+    State("date-filter",        "start_date"),
+    State("date-filter",        "end_date"),
+    prevent_initial_call=True,
+)
+def mfa_run_scan(n_clicks, scope, regions, sites, cells, modes, start, end):
+    if not n_clicks:
+        raise PreventUpdate
+
+    if scope == "network":
+        # Whole-network scan: use all cells in CELL_GEO_META regardless of filter
+        cell_list = list(CELL_GEO_META.keys())
+        if not cell_list:
+            return {"sectors": [], "error": "No geo metadata available.",
+                    "scope": "network"}
+    else:
+        filtered = _rfa_get_filtered(regions, sites, cells, modes, start, end)
+        if filtered.empty or "Cell Name" not in filtered.columns:
+            return None
+        cell_list = filtered["Cell Name"].dropna().unique().tolist()
+        if not cell_list:
+            return None
+
+    sectors = _mfa_group_sectors(cell_list)
+    if not sectors:
+        return {"sectors": [], "error": "No geo metadata available for selected cells.",
+                "scope": scope}
+
+    return {"sectors": sectors, "scope": scope}
+
+
+# ── MFA CALLBACK 2: summary cards ────────────────────────────────────────────
+@callback(
+    Output("mfa-summary-cards", "children"),
+    Input("mfa-results-store",  "data"),
+)
+def mfa_update_summary(store):
+    if not store or "error" in store or not store.get("sectors"):
+        return []
+
+    secs = store["sectors"]
+    scope = store.get("scope", "filter")
+    total_sectors        = len(secs)
+    sectors_with_missing = sum(1 for s in secs if s["missing_bands"])
+    total_missing        = sum(len(s["missing_bands"]) for s in secs)
+    n_sites              = len({s["site_key"] for s in secs})
+    n_regions            = len({s["region"] for s in secs})
+
+    per_band = {b: sum(1 for s in secs if b in s["missing_bands"]) for b in _MFA_BANDS}
+
+    # Coverage % per band
+    coverage_pct = {
+        b: round(100.0 * sum(1 for s in secs if b in s["present_bands"]) / max(total_sectors, 1), 1)
+        for b in _MFA_BANDS
+    }
+
+    scope_label = "Whole network" if scope == "network" else "Current filter"
+    cards = [
+        _mfa_stat_card("🌐" if scope == "network" else "🔍",
+                       "Scan scope", scope_label, ACCENT),
+        _mfa_stat_card("📡", "Sectors scanned",    total_sectors,           TEXT_PRIMARY),
+        _mfa_stat_card("⚠️",  "Sectors w/ gaps",    sectors_with_missing,    "#b45309"),
+        _mfa_stat_card("📻", "Total gaps",          total_missing,           "#ef4444"),
+        _mfa_stat_card("🏗️", "Sites",               n_sites,                 TEXT_PRIMARY),
+        _mfa_stat_card("🗺️", "Regions",              n_regions,               TEXT_PRIMARY),
+    ]
+    for band, cnt in per_band.items():
+        clr = _MFA_BAND_COLORS.get(band, ACCENT)
+        pct = coverage_pct[band]
+        cards.append(_mfa_stat_card(
+            "📶",
+            f"{band} MHz missing",
+            f"{cnt}  ({100-pct:.0f}% gap)",
+            clr,
+        ))
+
+    return cards
+
+
+# ── MFA CALLBACK 3: region stacked-bar chart ─────────────────────────────────
+@callback(
+    Output("mfa-region-chart", "figure"),
+    Input("mfa-results-store", "data"),
+)
+def mfa_update_region_chart(store):
+    if not store or not store.get("sectors"):
+        return _mfa_empty_fig()
+
+    secs = store["sectors"]
+    # Build (region, band) → count
+    from collections import defaultdict
+    reg_band: dict[tuple, int] = defaultdict(int)
+    for s in secs:
+        for b in s["missing_bands"]:
+            reg_band[(s["region"], b)] += 1
+
+    if not reg_band:
+        return _mfa_empty_fig("✅  No missing bands found in the current filter!")
+
+    regions = sorted({r for r, _ in reg_band})
+    fig = go.Figure()
+    for band in _MFA_BANDS:
+        counts = [reg_band.get((r, band), 0) for r in regions]
+        if any(counts):
+            fig.add_trace(go.Bar(
+                name=f"{band} MHz",
+                x=regions,
+                y=counts,
+                marker_color=_MFA_BAND_COLORS[band],
+                text=counts,
+                textposition="auto",
+                hovertemplate=f"<b>%{{x}}</b><br>{band} MHz missing: %{{y}} sectors<extra></extra>",
+            ))
+
+    fig.update_layout(
+        barmode="stack",
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": _MFA_FONT, "size": 11, "color": "#334155"},
+        xaxis={"gridcolor": "#f1f5f9", "tickangle": -30},
+        yaxis={"gridcolor": "#f1f5f9", "title": "Sectors with missing band"},
+        legend={"orientation": "h", "y": 1.08, "x": 0},
+        margin={"t": 40, "b": 60, "l": 50, "r": 20},
+        height=300,
+    )
+    return fig
+
+
+# ── MFA CALLBACK 4: band pie / donut chart ────────────────────────────────────
+@callback(
+    Output("mfa-band-pie",     "figure"),
+    Input("mfa-results-store", "data"),
+)
+def mfa_update_band_pie(store):
+    if not store or not store.get("sectors"):
+        return _mfa_empty_fig()
+
+    secs = store["sectors"]
+    per_band = {b: sum(1 for s in secs if b in s["missing_bands"]) for b in _MFA_BANDS}
+    labels = [f"{b} MHz" for b, v in per_band.items() if v > 0]
+    values = [v            for v in per_band.values()   if v > 0]
+    colors = [_MFA_BAND_COLORS[b] for b, v in per_band.items() if v > 0]
+
+    if not values:
+        return _mfa_empty_fig("✅  No missing bands found!")
+
+    fig = go.Figure(go.Pie(
+        labels=labels, values=values,
+        hole=0.45,
+        marker={"colors": colors, "line": {"color": "white", "width": 2}},
+        textinfo="label+percent",
+        hovertemplate="<b>%{label}</b><br>%{value} sectors missing<br>%{percent}<extra></extra>",
+    ))
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font={"family": _MFA_FONT, "size": 11},
+        legend={"orientation": "h", "y": -0.1},
+        margin={"t": 20, "b": 40, "l": 20, "r": 20},
+        height=300,
+    )
+    return fig
+
+
+# ── MFA CALLBACK 5: site × band heatmap ──────────────────────────────────────
+@callback(
+    Output("mfa-site-heatmap", "figure"),
+    Input("mfa-results-store", "data"),
+)
+def mfa_update_site_heatmap(store):
+    if not store or not store.get("sectors"):
+        return _mfa_empty_fig()
+
+    secs = store["sectors"]
+
+    # Build per-site band presence (if ANY sector has the band → present for that site)
+    from collections import defaultdict
+    site_present: dict[str, set] = defaultdict(set)
+    site_region:  dict[str, str] = {}
+    for s in secs:
+        site_present[s["site"]].update(s["present_bands"])
+        site_region[s["site"]] = s["region"]
+
+    # Sort sites by region then site name
+    all_sites = sorted(site_present.keys(), key=lambda x: (site_region[x], x))
+
+    # Build z matrix: 1=present (green), 0=missing (red)
+    z    = []
+    text = []
+    for site in all_sites:
+        row_z, row_t = [], []
+        for band in _MFA_BANDS:
+            present = band in site_present[site]
+            row_z.append(1 if present else 0)
+            row_t.append("✓" if present else "✗")
+        z.append(row_z)
+        text.append(row_t)
+
+    # Y-axis labels: "REGION · SITE"
+    y_labels = [f"{site_region[s]}  ·  {s}" for s in all_sites]
+    x_labels = [f"{b} MHz" for b in _MFA_BANDS]
+
+    colorscale = [[0.0, "#fee2e2"], [0.5, "#fee2e2"],
+                  [0.5, "#dcfce7"], [1.0, "#dcfce7"]]
+
+    fig = go.Figure(go.Heatmap(
+        z=z,
+        x=x_labels,
+        y=y_labels,
+        text=text,
+        texttemplate="%{text}",
+        colorscale=colorscale,
+        zmin=0, zmax=1,
+        showscale=False,
+        xgap=3, ygap=3,
+        hovertemplate="<b>%{y}</b><br>%{x}: %{text}<extra></extra>",
+    ))
+
+    h = max(260, 22 * len(all_sites) + 80)
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": _MFA_FONT, "size": 10, "color": "#334155"},
+        xaxis={"side": "top", "tickfont": {"size": 11, "color": "#374151"},
+               "gridcolor": "white"},
+        yaxis={"tickfont": {"size": 10}, "autorange": "reversed",
+               "gridcolor": "white"},
+        margin={"t": 40, "b": 20, "l": 10, "r": 20},
+        height=h,
+    )
+    return fig
+
+
+# ── MFA CALLBACK 6: region → site gap treemap ────────────────────────────────
+@callback(
+    Output("mfa-treemap",       "figure"),
+    Input("mfa-results-store",  "data"),
+)
+def mfa_update_treemap(store):
+    if not store or not store.get("sectors"):
+        return _mfa_empty_fig("Click 'Scan Missing Frequencies' to see the treemap")
+
+    secs = store["sectors"]
+    missing_secs = [s for s in secs if s["missing_bands"]]
+    if not missing_secs:
+        return _mfa_empty_fig("✅  No missing bands — all sectors are fully equipped!")
+
+    # Build records: one row per (region, site, band)
+    from collections import defaultdict
+    data: dict[tuple, int] = defaultdict(int)
+    for s in missing_secs:
+        for b in s["missing_bands"]:
+            data[(s["region"], s["site"], b)] += 1
+
+    ids, labels, parents, values, colors = [], [], [], [], []
+    # root
+    ids.append("root"); labels.append("All gaps"); parents.append(""); values.append(0)
+    region_totals: dict[str, int] = defaultdict(int)
+    site_totals:   dict[str, int] = defaultdict(int)
+
+    for (reg, site, band), cnt in data.items():
+        region_totals[reg] += cnt
+        site_totals[f"{reg}/{site}"] += cnt
+
+    for reg, total in sorted(region_totals.items()):
+        ids.append(reg); labels.append(reg); parents.append("root"); values.append(total)
+
+    for (reg, site, band), cnt in sorted(data.items()):
+        sk = f"{reg}/{site}"
+        if sk not in ids:
+            ids.append(sk); labels.append(site)
+            parents.append(reg); values.append(site_totals[sk])
+
+        leaf_id = f"{reg}/{site}/{band}"
+        ids.append(leaf_id)
+        labels.append(f"{band} MHz")
+        parents.append(sk)
+        values.append(cnt)
+        colors.append(_MFA_BAND_COLORS.get(band, ACCENT))
+
+    fig = go.Figure(go.Treemap(
+        ids=ids,
+        labels=labels,
+        parents=parents,
+        values=values,
+        branchvalues="total",
+        marker={
+            "colorscale": [
+                [0.0, "#fef9c3"], [0.5, "#f59e0b"], [1.0, "#dc2626"]
+            ],
+            "colors": [v for v in values],
+            "showscale": True,
+            "colorbar": {"title": "Gaps", "thickness": 12,
+                         "tickfont": {"size": 10}},
+        },
+        textinfo="label+value",
+        hovertemplate="<b>%{label}</b><br>Gaps: %{value}<extra></extra>",
+    ))
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin={"t": 20, "b": 10, "l": 10, "r": 10},
+        height=360,
+        font={"family": _MFA_FONT, "size": 11},
+    )
+    return fig
+
+
+# ── MFA CALLBACK 7: band coverage completeness by region ─────────────────────
+@callback(
+    Output("mfa-completeness-chart", "figure"),
+    Input("mfa-results-store",       "data"),
+)
+def mfa_update_completeness(store):
+    if not store or not store.get("sectors"):
+        return _mfa_empty_fig("Click 'Scan Missing Frequencies' to see coverage completeness")
+
+    secs = store["sectors"]
+    from collections import defaultdict
+    region_total:   dict[str, int] = defaultdict(int)
+    region_present: dict[str, dict] = defaultdict(lambda: {b: 0 for b in _MFA_BANDS})
+
+    for s in secs:
+        reg = s["region"]
+        region_total[reg] += 1
+        for b in s["present_bands"]:
+            if b in _MFA_BANDS:
+                region_present[reg][b] += 1
+
+    regions = sorted(region_total.keys())
+    if not regions:
+        return _mfa_empty_fig()
+
+    fig = go.Figure()
+    for band in _MFA_BANDS:
+        pcts = [
+            round(100.0 * region_present[r][band] / max(region_total[r], 1), 1)
+            for r in regions
+        ]
+        fig.add_trace(go.Bar(
+            name=f"{band} MHz",
+            x=regions,
+            y=pcts,
+            marker_color=_MFA_BAND_COLORS[band],
+            text=[f"{p:.0f}%" for p in pcts],
+            textposition="auto",
+            hovertemplate=(
+                f"<b>%{{x}}</b><br>{band} MHz coverage: %{{y:.1f}}%<extra></extra>"
+            ),
+        ))
+
+    # Target line at 100%
+    fig.add_hline(
+        y=100, line={"color": "#22c55e", "dash": "dot", "width": 1.5},
+        annotation_text="Full coverage", annotation_position="top right",
+        annotation_font_color="#22c55e",
+    )
+
+    fig.update_layout(
+        barmode="group",
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": _MFA_FONT, "size": 11, "color": "#334155"},
+        xaxis={"gridcolor": "#f1f5f9", "tickangle": -30},
+        yaxis={"gridcolor": "#f1f5f9", "title": "% of sectors with band",
+               "range": [0, 108]},
+        legend={"orientation": "h", "y": 1.08, "x": 0},
+        margin={"t": 40, "b": 60, "l": 55, "r": 20},
+        height=360,
+    )
+    return fig
+
+
+# ── MFA CALLBACK 8: detail table ─────────────────────────────────────────────
+@callback(
+    Output("mfa-table-wrap",   "children"),
+    Output("mfa-table-count",  "children"),
+    Input("mfa-results-store", "data"),
+)
+def mfa_update_table(store):
+    empty_msg = html.Div(
+        "Click 'Scan Missing Frequencies' to populate this table.",
+        style={"display": "flex", "alignItems": "center",
+               "justifyContent": "center", "minHeight": "120px",
+               "color": TEXT_MUTED, "fontSize": "13px",
+               "padding": "20px"},
+    )
+
+    if not store:
+        return empty_msg, ""
+    if "error" in store:
+        return html.Div(store["error"],
+                        style={"padding": "16px", "color": "#dc2626",
+                               "fontSize": "13px"}), ""
+    if not store.get("sectors"):
+        return empty_msg, ""
+
+    secs = store["sectors"]
+    # Only keep sectors that are actually missing something
+    rows_with_missing = [s for s in secs if s["missing_bands"]]
+
+    if not rows_with_missing:
+        return html.Div(
+            "✅  Every sector in the current filter has all three main bands deployed.",
+            style={"padding": "20px", "color": "#15803d",
+                   "fontWeight": 600, "fontSize": "13px"},
+        ), "0 gaps"
+
+    table_data = []
+    for s in sorted(rows_with_missing,
+                    key=lambda x: (x["region"], x["site"], x["sector_az"])):
+        table_data.append({
+            "Region":          s["region"],
+            "Site":            s["site"],
+            "Sector Az (°)":   int(s["sector_az"]),
+            "Present Bands":   ", ".join(f"{b} MHz" for b in s["present_bands"]) or "—",
+            "Missing Bands":   ", ".join(f"{b} MHz" for b in s["missing_bands"]),
+            "# Missing":       len(s["missing_bands"]),
+            "Cells in Sector": ", ".join(s["cell_names"]),
+            "# Cells":         s["n_cells"],
+        })
+
+    cols = [{"name": c, "id": c} for c in table_data[0].keys()]
+
+    table = dash_table.DataTable(
+        data=table_data,
+        columns=cols,
+        page_size=20,
+        sort_action="native",
+        filter_action="native",
+        page_action="native",
+        style_table={"overflowX": "auto", "maxHeight": "500px",
+                     "overflowY": "auto"},
+        style_cell={
+            "textAlign": "left", "padding": "9px 12px",
+            "fontSize": "12px",
+            "fontFamily": "'Inter', sans-serif",
+            "border": f"1px solid {BORDER_COLOR}",
+            "minWidth": "90px",
+        },
+        style_header={
+            "fontWeight": 700, "backgroundColor": "#f1f5f9",
+            "borderBottom": f"2px solid {BORDER_COLOR}",
+            "fontSize": "11px", "textTransform": "uppercase",
+            "letterSpacing": "0.3px",
+        },
+        style_data_conditional=[
+            {"if": {"filter_query": '{# Missing} = 3'},
+             "backgroundColor": "#fee2e2", "color": "#7f1d1d"},
+            {"if": {"filter_query": '{# Missing} = 2'},
+             "backgroundColor": "#fff7ed", "color": "#7c2d12"},
+            {"if": {"filter_query": '{# Missing} = 1'},
+             "backgroundColor": "#fefce8", "color": "#713f12"},
+            {"if": {"row_index": "odd"}, "backgroundColor": "#fafbff"},
+        ],
+        style_cell_conditional=[
+            {"if": {"column_id": "Cells in Sector"},
+             "maxWidth": "280px", "overflow": "hidden",
+             "textOverflow": "ellipsis", "whiteSpace": "nowrap"},
+        ],
+        tooltip_data=[
+            {"Cells in Sector": {"value": row["Cells in Sector"],
+                                  "type": "markdown"}}
+            for row in table_data
+        ],
+        tooltip_delay=0, tooltip_duration=None,
+    )
+
+    count_label = (
+        f"{len(rows_with_missing)} sector{'s' if len(rows_with_missing) != 1 else ''} "
+        f"with missing bands · "
+        f"{sum(r['# Missing'] for r in table_data)} total gaps"
+    )
+    return table, count_label
+
+
+# ── MFA CALLBACK 7: CSV export ────────────────────────────────────────────────
+@callback(
+    Output("mfa-download",     "data"),
+    Input("mfa-export-btn",    "n_clicks"),
+    State("mfa-results-store", "data"),
+    prevent_initial_call=True,
+)
+def mfa_export_csv(n_clicks, store):
+    if not store or not store.get("sectors"):
+        raise PreventUpdate
+
+    secs = store["sectors"]
+    rows = []
+    for s in secs:
+        for band in _MFA_BANDS:
+            rows.append({
+                "Region":          s["region"],
+                "Site":            s["site"],
+                "Site Key":        s["site_key"],
+                "Sector Az (deg)": int(s["sector_az"]),
+                "Band (MHz)":      band,
+                "Status":          "Present" if band in s["present_bands"] else "Missing",
+                "Cells in Sector": "; ".join(s["cell_names"]),
+                "N Cells":         s["n_cells"],
+            })
+
+    export_df = pd.DataFrame(rows)
+    return dcc.send_data_frame(
+        export_df.to_csv,
+        "missing_frequency_analysis.csv",
+        index=False,
+    )
+
+
+# =============================================================================
+# RFA SEARCH / FILTER CALLBACKS
+# =============================================================================
+
+# ── RFA Search: populate the site dropdown from results ───────────────────────
+@callback(
+    Output("rfa-site-filter", "options"),
+    Input("rfa-results-store", "data"),
+)
+def rfa_populate_site_options(result):
+    if not result:
+        return []
+    recs = result.get("recommendations", [])
+    sites = sorted({r.get("site", "") for r in recs if r.get("site")})
+    return [{"label": s, "value": s} for s in sites]
+
+
+# ── RFA Search: clear all filters ─────────────────────────────────────────────
+@callback(
+    Output("rfa-search-input",       "value"),
+    Output("rfa-action-filter",      "value"),
+    Output("rfa-site-filter",        "value"),
+    Output("rfa-recovery-threshold", "value"),
+    Input("rfa-clear-filters-btn",   "n_clicks"),
+    prevent_initial_call=True,
+)
+def rfa_clear_filters(_):
+    return "", "__all__", [], 0
+
+
+# ── RFA Search: filter recommendation panels + active-filter banner ───────────
+@callback(
+    Output("rfa-panel-short",          "children"),
+    Output("rfa-panel-medium",         "children"),
+    Output("rfa-panel-long",           "children"),
+    Output("rfa-rec-count",            "children"),
+    Output("rfa-export-bar",           "children"),
+    Output("rfa-filter-active-banner", "children"),
+    Input("rfa-results-store",         "data"),
+    Input("rfa-search-input",          "value"),
+    Input("rfa-action-filter",         "value"),
+    Input("rfa-site-filter",           "value"),
+    Input("rfa-recovery-threshold",    "value"),
+)
+def rfa_update_recommendations(result, search_text, action_filter,
+                                site_filter, min_recovery):
+    empty_panel = html.Div(
+        "Run the analysis to see recommendations.",
+        style={"color": TEXT_MUTED, "fontSize": "13px",
+               "padding": "18px 20px", "fontStyle": "italic"},
+    )
+    if not result:
+        return empty_panel, empty_panel, empty_panel, "", html.Div(), html.Div()
+
+    all_recs = result.get("recommendations", [])
+    n_total  = len(all_recs)
+
+    # ── Apply filters ─────────────────────────────────────────────────────────
+    recs = all_recs
+
+    # Action type filter
+    if action_filter and action_filter != "__all__":
+        recs = [r for r in recs if r.get("action_type") == action_filter]
+
+    # Site filter (multi-select)
+    if site_filter:
+        site_set = set(site_filter)
+        recs = [r for r in recs if r.get("site") in site_set]
+
+    # Recovery threshold
+    if min_recovery:
+        recs = [r for r in recs if r.get("recovery_pct", 0) >= int(min_recovery)]
+
+    # Free-text search (site name, cell name, action type, rationale)
+    if search_text and search_text.strip():
+        q = search_text.strip().lower()
+        filtered = []
+        for r in recs:
+            haystack = " ".join([
+                str(r.get("site", "")),
+                str(r.get("action_type", "")),
+                " ".join(r.get("affected_cells", [])),
+                " ".join(r.get("helper_cells", [])),
+                str(r.get("rationale", "")),
+                str(r.get("suggested_delta", "")),
+            ]).lower()
+            if q in haystack:
+                filtered.append(r)
+        recs = filtered
+
+    n_filtered = len(recs)
+
+    # ── Active-filter banner ──────────────────────────────────────────────────
+    filters_on = bool(
+        (search_text and search_text.strip())
+        or (action_filter and action_filter != "__all__")
+        or site_filter
+        or (min_recovery and min_recovery > 0)
+    )
+    if filters_on:
+        banner = html.Div([
+            html.Span(
+                f"🔍  Showing {n_filtered} of {n_total} recommendations  ·  ",
+                style={"fontSize": "12px", "fontWeight": 600, "color": "#374151"},
+            ),
+            html.Span(
+                "filters active",
+                style={"fontSize": "11px", "color": ACCENT,
+                       "fontWeight": 700, "fontStyle": "italic"},
+            ),
+        ], style={
+            "padding": "6px 16px",
+            "background": "#eef2ff",
+            "borderBottom": f"1px solid #c7d2fe",
+            "display": "flex", "alignItems": "center", "gap": "4px",
+        })
+    else:
+        banner = html.Div()
+
+    # ── Build panels ──────────────────────────────────────────────────────────
+    n_short  = sum(1 for r in recs if r.get("priority") == "short")
+    n_medium = sum(1 for r in recs if r.get("priority") == "medium")
+    n_long   = sum(1 for r in recs if r.get("priority") == "long")
+
+    count_full = (
+        f"{n_filtered} shown"
+        + (f" / {n_total} total" if filters_on else "")
+        + f"  ·  🟢 {n_short}  🟡 {n_medium}  🔴 {n_long}"
+    )
+
+    short_panel  = _build_priority_panel(recs, "short")
+    medium_panel = _build_priority_panel(recs, "medium")
+    long_panel   = _build_priority_panel(recs, "long")
+
+    export_bar = html.Div(
+        html.Span(
+            f"🟢 {n_short}  🟡 {n_medium}  🔴 {n_long}",
+            style={"fontSize": "11px", "color": TEXT_MUTED, "fontWeight": 500},
+        )
+    )
+
+    return short_panel, medium_panel, long_panel, count_full, export_bar, banner

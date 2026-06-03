@@ -839,7 +839,7 @@ def analyse_cluster(
         }
 
     # Cap for performance
-    if len(valid) > 500:
+    if len(valid) > 50000:
         warning = (
             f"Filter contains {len(valid)} cells — analysis capped at the "
             f"top 500 by congestion level. Refine the filter for full detail."

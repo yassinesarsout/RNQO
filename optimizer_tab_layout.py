@@ -486,6 +486,110 @@ def build_optimizer_tab() -> dcc.Tab:
                     "gap": "6px",
                 }),
 
+                # ── Search / filter toolbar ──────────────────────────────────
+                html.Div([
+                    # Free-text search
+                    html.Div([
+                        html.Span("🔍", style={"position": "absolute", "left": "10px",
+                                               "top": "50%", "transform": "translateY(-50%)",
+                                               "fontSize": "13px", "color": TEXT_MUTED,
+                                               "pointerEvents": "none"}),
+                        dcc.Input(
+                            id="rfa-search-input",
+                            type="text",
+                            placeholder="Search by site, cell or action…",
+                            debounce=True,
+                            style={
+                                "width": "100%", "padding": "7px 10px 7px 32px",
+                                "fontSize": "12px",
+                                "border": f"1px solid {BORDER_COLOR}",
+                                "borderRadius": "8px",
+                                "fontFamily": "'Inter', sans-serif",
+                                "outline": "none",
+                            },
+                        ),
+                    ], style={"position": "relative", "flex": 2, "minWidth": "200px"}),
+
+                    # Action-type filter
+                    html.Div([
+                        html.Label("Action type",
+                                   style={"fontSize": "10px", "fontWeight": 600,
+                                          "color": TEXT_MUTED, "display": "block",
+                                          "marginBottom": "3px",
+                                          "textTransform": "uppercase",
+                                          "letterSpacing": "0.4px"}),
+                        dcc.Dropdown(
+                            id="rfa-action-filter",
+                            options=[
+                                {"label": "All actions",               "value": "__all__"},
+                                {"label": "Freq-band rebalancing",     "value": "freq_balance"},
+                                {"label": "Uptilt (TA too low)",       "value": "tilt_up"},
+                                {"label": "Downtilt (TA too high)",    "value": "tilt_down"},
+                                {"label": "Intra-site sector relief",  "value": "intra_site_neighbor_tilt"},
+                                {"label": "Inter-site neighbour tilt", "value": "inter_site_neighbor_tilt"},
+                                {"label": "Deploy missing band",       "value": "add_band"},
+                                {"label": "Add sector",                "value": "add_sector"},
+                                {"label": "New site",                  "value": "new_site"},
+                            ],
+                            value="__all__",
+                            clearable=False,
+                            style={"fontSize": "12px", "minWidth": "200px"},
+                        ),
+                    ], style={"flex": 2, "minWidth": "180px"}),
+
+                    # Site filter
+                    html.Div([
+                        html.Label("Filter by site",
+                                   style={"fontSize": "10px", "fontWeight": 600,
+                                          "color": TEXT_MUTED, "display": "block",
+                                          "marginBottom": "3px",
+                                          "textTransform": "uppercase",
+                                          "letterSpacing": "0.4px"}),
+                        dcc.Dropdown(
+                            id="rfa-site-filter",
+                            options=[],   # populated by callback
+                            placeholder="All sites",
+                            multi=True,
+                            style={"fontSize": "12px", "minWidth": "180px"},
+                        ),
+                    ], style={"flex": 2, "minWidth": "180px"}),
+
+                    # Recovery threshold
+                    html.Div([
+                        html.Label("Min recovery %",
+                                   style={"fontSize": "10px", "fontWeight": 600,
+                                          "color": TEXT_MUTED, "display": "block",
+                                          "marginBottom": "3px",
+                                          "textTransform": "uppercase",
+                                          "letterSpacing": "0.4px"}),
+                        dcc.Slider(
+                            id="rfa-recovery-threshold",
+                            min=0, max=90, step=10, value=0,
+                            marks={0: "0%", 30: "30%", 50: "50%", 90: "90%"},
+                            tooltip={"placement": "bottom", "always_visible": False},
+                        ),
+                    ], style={"flex": 2, "minWidth": "200px", "paddingBottom": "4px"}),
+
+                    # Clear filters button
+                    html.Button("✕ Clear",
+                                id="rfa-clear-filters-btn", n_clicks=0,
+                                style={
+                                    **_PILL_BTN,
+                                    "fontSize": "11px", "padding": "6px 12px",
+                                    "alignSelf": "flex-end", "flexShrink": 0,
+                                }),
+
+                ], style={
+                    "display": "flex", "alignItems": "flex-end",
+                    "gap": "12px", "flexWrap": "wrap",
+                    "padding": "10px 16px",
+                    "background": "#f8fafc",
+                    "borderBottom": f"1px solid {BORDER_COLOR}",
+                }),
+
+                # Active-filter summary pill (shown when filters are applied)
+                html.Div(id="rfa-filter-active-banner", style={"minHeight": "0px"}),
+
                 # Priority tabs
                 dcc.Loading(
                     type="dot", color="#6366f1",
@@ -597,6 +701,264 @@ def build_optimizer_tab() -> dcc.Tab:
                 "border": f"1px solid {BORDER_COLOR}",
                 "marginBottom": "16px",
             }),
+
+            # ── Missing Frequency Analysis ────────────────────────────────────
+
+            # Divider
+            html.Div([
+                html.Div(style={
+                    "flex": 1,
+                    "height": "1px",
+                    "background": "linear-gradient(to right, transparent, #fcd34d, transparent)",
+                }),
+                html.Span("Missing Frequency Analysis", style={
+                    "fontSize": "11px", "fontWeight": 700,
+                    "color": "#b45309", "padding": "0 16px",
+                    "textTransform": "uppercase", "letterSpacing": "1px",
+                    "whiteSpace": "nowrap",
+                }),
+                html.Div(style={
+                    "flex": 1,
+                    "height": "1px",
+                    "background": "linear-gradient(to right, #fcd34d, transparent)",
+                }),
+            ], style={
+                "display": "flex", "alignItems": "center",
+                "margin": "28px 0 20px 0",
+            }),
+
+            # Header card
+            html.Div([
+                html.Div([
+                    html.H2("📻  Missing Frequency Band Scanner",
+                            style={"margin": "0 0 4px 0", "color": TEXT_PRIMARY,
+                                   "fontSize": "18px"}),
+                    html.P(
+                        "Scans every sector and identifies which of the three main frequency "
+                        "bands (800 MHz, 1800 MHz, 2100 MHz) are absent. TDD is excluded. "
+                        "Use 'Whole network' to scan all cells regardless of the global filter. "
+                        "Results break down by region and site with charts and CSV export.",
+                        style={"margin": 0, "color": TEXT_MUTED, "fontSize": "13px",
+                               "lineHeight": "1.6"},
+                    ),
+                ], style={"flex": 1}),
+                html.Div([
+                    # Scope toggle
+                    html.Div([
+                        html.Label("Scan scope",
+                                   style={"fontSize": "10px", "fontWeight": 600,
+                                          "color": TEXT_MUTED,
+                                          "textTransform": "uppercase",
+                                          "letterSpacing": "0.4px",
+                                          "display": "block", "marginBottom": "4px"}),
+                        dcc.RadioItems(
+                            id="mfa-scope",
+                            options=[
+                                {"label": " Current filter", "value": "filter"},
+                                {"label": " Whole network",  "value": "network"},
+                            ],
+                            value="filter", inline=True,
+                            labelStyle={"marginRight": "14px", "fontSize": "12px",
+                                        "cursor": "pointer"},
+                        ),
+                    ], style={"marginBottom": "8px"}),
+                    html.Button(
+                        "📻  Scan Missing Frequencies",
+                        id="mfa-run-btn", n_clicks=0,
+                        style={
+                            **_PRIMARY_BTN,
+                            "background": "#b45309",
+                            "border": "1px solid #b45309",
+                            "fontSize": "13px",
+                            "padding": "10px 22px",
+                            "borderRadius": "10px",
+                            "fontWeight": 700,
+                        },
+                    ),
+                ], style={"flexShrink": 0, "display": "flex",
+                          "flexDirection": "column", "alignItems": "flex-start"}),
+            ], style={
+                "display": "flex", "alignItems": "flex-start", "gap": "16px",
+                "flexWrap": "wrap", "marginBottom": "16px",
+                "padding": "16px 20px",
+                "background": "white",
+                "border": "1px solid #fcd34d55",
+                "borderRadius": "16px",
+                "borderLeft": "4px solid #f59e0b",
+            }),
+
+            # Summary stat cards
+            dcc.Loading(
+                type="dot", color="#f59e0b",
+                children=html.Div(
+                    id="mfa-summary-cards",
+                    style={
+                        "display": "grid",
+                        "gridTemplateColumns": "repeat(auto-fit, minmax(150px, 1fr))",
+                        "gap": "12px", "marginBottom": "16px", "minHeight": "80px",
+                    },
+                ),
+            ),
+
+            # Charts row 1 — stacked bar by region + pie by band
+            html.Div([
+                html.Div([
+                    html.Div("Missing bands per region (sector count)",
+                             style={"fontWeight": 600, "fontSize": "13px",
+                                    "padding": "12px 16px",
+                                    "borderBottom": f"1px solid {BORDER_COLOR}"}),
+                    dcc.Loading(
+                        type="dot", color="#f59e0b",
+                        children=dcc.Graph(
+                            id="mfa-region-chart",
+                            config={"displayModeBar": False},
+                            style={"minHeight": "280px"},
+                        ),
+                    ),
+                ], style={
+                    "flex": 3, "minWidth": "340px",
+                    "background": SURFACE, "borderRadius": "12px",
+                    "border": f"1px solid {BORDER_COLOR}",
+                }),
+                html.Div([
+                    html.Div("Gap distribution by band",
+                             style={"fontWeight": 600, "fontSize": "13px",
+                                    "padding": "12px 16px",
+                                    "borderBottom": f"1px solid {BORDER_COLOR}"}),
+                    dcc.Loading(
+                        type="dot", color="#f59e0b",
+                        children=dcc.Graph(
+                            id="mfa-band-pie",
+                            config={"displayModeBar": False},
+                            style={"minHeight": "280px"},
+                        ),
+                    ),
+                ], style={
+                    "flex": 2, "minWidth": "260px",
+                    "background": SURFACE, "borderRadius": "12px",
+                    "border": f"1px solid {BORDER_COLOR}",
+                }),
+            ], style={
+                "display": "flex", "gap": "16px",
+                "marginBottom": "16px", "flexWrap": "wrap",
+            }),
+
+            # Charts row 2 — treemap (region→site→gaps) + coverage completeness bar
+            html.Div([
+                html.Div([
+                    html.Div([
+                        html.Span("Region → Site gap treemap",
+                                  style={"fontWeight": 600, "fontSize": "13px"}),
+                        html.Span(
+                            "  Size = total missing-band slots · Color = gap density",
+                            style={"fontSize": "11px", "color": TEXT_MUTED,
+                                   "marginLeft": "6px"},
+                        ),
+                    ], style={"padding": "12px 16px",
+                              "borderBottom": f"1px solid {BORDER_COLOR}",
+                              "display": "flex", "alignItems": "center",
+                              "flexWrap": "wrap"}),
+                    dcc.Loading(
+                        type="dot", color="#f59e0b",
+                        children=dcc.Graph(
+                            id="mfa-treemap",
+                            config={"displayModeBar": False},
+                            style={"minHeight": "340px"},
+                        ),
+                    ),
+                ], style={
+                    "flex": 3, "minWidth": "380px",
+                    "background": SURFACE, "borderRadius": "12px",
+                    "border": f"1px solid {BORDER_COLOR}",
+                }),
+                html.Div([
+                    html.Div([
+                        html.Span("Band coverage completeness by region",
+                                  style={"fontWeight": 600, "fontSize": "13px"}),
+                        html.Span(
+                            "  % of sectors that have each band",
+                            style={"fontSize": "11px", "color": TEXT_MUTED,
+                                   "marginLeft": "6px"},
+                        ),
+                    ], style={"padding": "12px 16px",
+                              "borderBottom": f"1px solid {BORDER_COLOR}",
+                              "display": "flex", "alignItems": "center",
+                              "flexWrap": "wrap"}),
+                    dcc.Loading(
+                        type="dot", color="#f59e0b",
+                        children=dcc.Graph(
+                            id="mfa-completeness-chart",
+                            config={"displayModeBar": False},
+                            style={"minHeight": "340px"},
+                        ),
+                    ),
+                ], style={
+                    "flex": 2, "minWidth": "280px",
+                    "background": SURFACE, "borderRadius": "12px",
+                    "border": f"1px solid {BORDER_COLOR}",
+                }),
+            ], style={
+                "display": "flex", "gap": "16px",
+                "marginBottom": "16px", "flexWrap": "wrap",
+            }),
+
+            # Site-level heatmap
+            html.Div([
+                html.Div("Site × Band coverage matrix  (✓ present · ✗ missing)",
+                         style={"fontWeight": 600, "fontSize": "13px",
+                                "padding": "12px 16px",
+                                "borderBottom": f"1px solid {BORDER_COLOR}"}),
+                dcc.Loading(
+                    type="dot", color="#f59e0b",
+                    children=dcc.Graph(
+                        id="mfa-site-heatmap",
+                        config={"displayModeBar": False},
+                        style={"minHeight": "300px"},
+                    ),
+                ),
+            ], style={
+                "background": SURFACE, "borderRadius": "12px",
+                "border": f"1px solid {BORDER_COLOR}",
+                "marginBottom": "16px",
+            }),
+
+            # Detail table + export
+            html.Div([
+                html.Div([
+                    html.Span("📋  Sector-level detail",
+                              style={"fontWeight": 700, "fontSize": "14px",
+                                     "color": TEXT_PRIMARY}),
+                    html.Span(id="mfa-table-count",
+                              style={"fontSize": "11px", "color": TEXT_MUTED,
+                                     "marginLeft": "8px"}),
+                    html.Div(style={"flex": 1}),
+                    html.Button(
+                        "⬇  Export CSV",
+                        id="mfa-export-btn", n_clicks=0,
+                        style={
+                            **_PILL_BTN,
+                            "fontSize": "12px", "padding": "6px 16px",
+                        },
+                    ),
+                    dcc.Download(id="mfa-download"),
+                ], style={
+                    "display": "flex", "alignItems": "center",
+                    "padding": "12px 16px",
+                    "borderBottom": f"1px solid {BORDER_COLOR}",
+                    "gap": "6px",
+                }),
+                dcc.Loading(
+                    type="dot", color="#f59e0b",
+                    children=html.Div(id="mfa-table-wrap"),
+                ),
+            ], style={
+                "background": SURFACE, "borderRadius": "12px",
+                "border": f"1px solid {BORDER_COLOR}",
+                "marginBottom": "16px", "overflow": "hidden",
+            }),
+
+            # Hidden store for missing-freq results
+            dcc.Store(id="mfa-results-store", data=None),
 
             # ── Hidden stores ─────────────────────────────────────────────────
             dcc.Store(id="rfa-results-store", data=None),
