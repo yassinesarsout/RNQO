@@ -107,6 +107,63 @@ def toggle_sector_approach(_, current):
     return     "ta",  "📡 Freq Shape",  _APPROACH_BTN_OFF
 
 
+from lte_data_pipeline import run_pipeline   # add at top of file with other imports
+
+@callback(
+    Output("pipeline-status", "children"),
+    Input("run-pipeline-btn", "n_clicks"),
+    State("pipeline-kpi-path",  "value"),
+    State("pipeline-conf-path", "value"),
+    State("thr-p0_prb",   "value"),  State("thr-p0_thp",   "value"),
+    State("thr-p0_users", "value"),
+    State("thr-p1_prb",   "value"),  State("thr-p1_thp",   "value"),
+    State("thr-p1_users", "value"),
+    prevent_initial_call=True,
+)
+def run_full_pipeline(n_clicks,
+                      kpi_path, conf_path,
+                      p0_prb, p0_thp, p0_users,
+                      p1_prb, p1_thp, p1_users):
+    if not n_clicks:
+        raise PreventUpdate
+
+    kpi_path  = (kpi_path  or "").strip()
+    conf_path = (conf_path or "").strip()
+
+    # ── Step 1: validate inputs ───────────────────────────────
+
+
+    # ── Step 2: run the cleaning pipeline ────────────────────
+    try:
+        run_pipeline(
+            kpi_path=kpi_path,
+            conf_path=conf_path,
+            kpi_out="datasets/final_kpi_data.csv",
+            info_out="datasets/final_info_data.csv",
+            save=True,
+        )
+    except Exception as exc:
+        return f"❌ Pipeline failed: {exc}"
+
+    # ── Step 3: recompute congestion from the freshly cleaned KPI ──
+    def _f(v, d): return float(v) if v is not None else d
+    thresholds = {
+        "p0_prb":   _f(p0_prb,   90),  "p0_thp":   _f(p0_thp,   2000),
+        "p0_users": _f(p0_users, 8),
+        "p1_prb":   _f(p1_prb,   80),  "p1_thp":   _f(p1_thp,   4000),
+        "p1_users": _f(p1_users, 4),
+    }
+    status = _cong_run_and_save(
+        "datasets/final_kpi_data.csv",
+        thresholds=thresholds,
+        mode="replace",
+    )
+
+    if status.startswith("✅"):
+        _df_filter_cache.clear()
+        return f"✅ Pipeline complete — cleaned data saved, congestion recomputed. {status}"
+
+    return f"⚠️ Pipeline ran but congestion step failed: {status}"
 # ============================================================
 # Settings tab — recompute congestion from raw KPI file
 # Thresholds are read directly from the Settings tab inputs.

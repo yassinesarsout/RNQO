@@ -618,6 +618,9 @@ def _tab_geometry_map():
 def _tab_settings():
     raw_exists = Path(RAW_DATA_PATH).exists()
     raw_label  = RAW_DATA_PATH.split("/")[-1]
+    _CONF_DATA_PATH = "datasets\LTE_cell_Plan_HU_MasterFile.csv"   # add near RAW_DATA_PATH at top of file
+    conf_exists  = Path(_CONF_DATA_PATH).exists()
+    conf_label   = _CONF_DATA_PATH.split("/")[-1]
 
     def _row(label, value):
         ok = value and not str(value).startswith("❌")
@@ -633,6 +636,69 @@ def _tab_settings():
         label="⚙️ Settings",
         style=_TAB_STYLE, selected_style=_TAB_SELECTED,
         children=[html.Div([
+            # ── Section 0: Run full data pipeline ─────────────────────────
+html.Div([
+    html.Div([
+        html.Span("🔧", style={"fontSize": "18px", "marginRight": "10px"}),
+        html.Span("Run Data Pipeline",
+                  style={"fontWeight": 700, "fontSize": "15px",
+                         "color": TEXT_PRIMARY}),
+    ], style={"display": "flex", "alignItems": "center",
+              "marginBottom": "6px"}),
+    html.P(
+        "Point to the two raw source files, then click Run. The pipeline "
+        "cleans both datasets, aligns them to common cells, and writes "
+        "final_kpi_data.csv and final_info_data.csv to the datasets/ folder. "
+        "Congestion is then recomputed automatically from the cleaned KPI file.",
+        style={"fontSize": "12px", "color": TEXT_MUTED,
+               "marginBottom": "18px"},
+    ),
+    html.Div([
+        html.Div([
+            html.Label("Raw KPI CSV", style=_LBL),
+            dcc.Input(
+                id="pipeline-kpi-path",
+                value="datasets\Congestion_4G_Query_Result_20260413110442414(Subreport 1).csv",
+                type="text",
+                placeholder="path/to/kpi_raw.csv",
+                style={"fontSize": "12px", "padding": "6px 10px",
+                       "border": f"1px solid {BORDER_COLOR}",
+                       "borderRadius": "10px", "width": "380px"},
+            ),
+        ]),
+        html.Div([
+            html.Label("Config master CSV", style=_LBL),
+            dcc.Input(
+                id="pipeline-conf-path",
+                value="datasets\LTE_cell_Plan_HU_MasterFile.csv",
+                type="text",
+                placeholder="path/to/masterfile.csv",
+                style={"fontSize": "12px", "padding": "6px 10px",
+                       "border": f"1px solid {BORDER_COLOR}",
+                       "borderRadius": "10px", "width": "380px"},
+            ),
+        ]),
+        html.Div([
+            html.Label("\u200b", style=_LBL),   # invisible spacer
+            html.Button(
+                "🔧  Run Pipeline & Compute",
+                id="run-pipeline-btn", n_clicks=0,
+                style={**_PILL_BTN,
+                       "background": "#fefce8",
+                       "border": "1px solid #fde047",
+                       "color": "#854d0e",
+                       "fontWeight": 600,
+                       "padding": "7px 18px"},
+            ),
+        ]),
+    ], style={"display": "flex", "gap": "16px",
+              "alignItems": "flex-end", "flexWrap": "wrap",
+              "marginBottom": "12px"}),
+
+    html.Div(id="pipeline-status",
+             style={"fontSize": "13px", "color": TEXT_MUTED,
+                    "fontStyle": "italic"}),
+], style=SECTION_STYLE),
 
             # ── Section 1: Dataset status ──────────────────────────────────
             html.Div([
@@ -649,6 +715,9 @@ def _tab_settings():
                 _row("Raw KPI file",
                      f"{raw_label} found — {RAW_DATA_PATH}"
                      if raw_exists else f"❌ {raw_label} not found"),
+                _row("Config master file",                             # ← NEW
+                     f"{conf_label} found — {_CONF_DATA_PATH}"
+                     if conf_exists else f"❌ {conf_label} not found"),
             ], style=SECTION_STYLE),
 
             # ── Section 2: Congestion engine ──────────────────────────────
