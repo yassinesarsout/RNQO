@@ -4,43 +4,16 @@
 
 It combines an offline data cleaning and spatial neighbor pipeline with a 6-tab interactive web dashboard that takes raw OSS/KPI counter exports and cell configuration files all the way from data ingestion to automated parameter optimization ($\Delta\wp$ transmit power and $\Delta\hbar$ handover margin) and tiered RF engineering recommendations.
 
-## 1. Key Capabilities
-
-* **Automated LTE Data Cleaning Pipeline ([`lte_data_pipeline.py`](https://drive.google.com/file/d/1tKlOOZYsB8bSX8xfTYnp5sQSC2-KCcSv/view?usp=drivesdk))**: Parses raw 4G KPI exports and semicolon-delimited cell plan master files, strips formatting artifacts, filters out cells with $>25\%$ missing KPI records, performs linear per-cell time-series interpolation, maps carrier frequency bands (`800 MHz`, `1800 MHz`, `2100 MHz`, `TDD`), and aligns both datasets to common cells.
-* **Persistence-Aware Congestion Engine ([`congestion_engine.py`](https://drive.google.com/file/d/1UIv8f6Sc5BFSGJNnW66gf7GPB7hVToMt/view?usp=drivesdk))**: Flags hourly **P0 (Severe)** and **P1 (Moderate)** congestion using a simultaneous 3-way threshold rule (`DL PRB Load`, `LTE DL User Throughput`, and `Active Users`), identifies daily cell busy hours, computes composite severity scores (`0–100`), and applies an ISO-week persistence rule ($\ge 4$ congested days/week across $\ge 2$ calendar weeks).
-* **Geospatial Sector & Neighbor Graph Modeling ([`geo_utils.py`](https://drive.google.com/file/d/1Jvb3GBZnT2GqcLrh0FLzjR90-xGwuMCi/view?usp=drivesdk), [`build_cell_neighbors.py`](https://drive.google.com/file/d/1fGPhNyTwdloSwBkBu1h0vCPfOY2tHLqs/view?usp=drivesdk), [`neighbor_graph.py`](https://drive.google.com/file/d/1l-1NR3gY7NYEXFdJpYH_hpnViAaIpk2V/view?usp=drivesdk))**: Generates directional sector footprints using either **Average Timing Advance (TA)** (`40 m–250 m` radius, $\pm 32^\circ$ half-angle) or **Frequency-Band Geometry** (`800/1800/2100/TDD` beamwidths and ranges), and computes pairwise Haversine/Shapely overlap matrices ($\eta_{i,j}$).
-* **AI-Powered Multi-Horizon KPI Forecasting ([`train_xgboost.py`](https://drive.google.com/file/d/1dxwzgRLggcaznhp7oQsjxzAw3QFodrR6/view?usp=drivesdk), [`forecast_callbacks.py`](https://drive.google.com/file/d/1I_5i5RHiCB6rJxyjNruGIq2OqmLVV3zJ/view?usp=drivesdk))**: Uses pre-trained **XGBoost** regressors (with automatic lag-blend fallback) to predict `DL PRB Load`, `Active Users`, and `LTE DL User Throughput` across horizons from **6 hours to 1 week (168 hours)**, complete with a **What-If Traffic Growth Simulator** (`1.0x–3.0x`) and background 7-day caching.
-* **Algorithmic Congestion Optimization ([`optimizer_core.py`](https://drive.google.com/file/d/12EZVMPb7Q8usyORj7dgQTY7nTVbpnjaD/view?usp=drivesdk), [`capacity_predictor.py`](https://drive.google.com/file/d/18wO7jDoJOu1UyfdJ5b_veNSw4BfFDVsk/view?usp=drivesdk))**: Recommends discrete per-cell transmit power reductions ($\Delta\wp \in \{0, 1, 2, 3\}\text{ dB}$) and handover margin increases ($\Delta\hbar \in \{0, 1, 2, 3\}\text{ dB}$) using **BCDSA** (Block-Coordinate Descent with Simulated Annealing), **Greedy Descent**, or a **Genetic Algorithm (GA)** on either current or forecasted network states.
-* **RF Cluster Analysis & Missing Band Scanner ([`cluster_analyzer.py`](https://drive.google.com/file/d/1EgZn7Fj9gUvyckMhcax3cNr6CbWxd4-c/view?usp=drivesdk), [`optimizer_callbacks.py`](https://drive.google.com/file/d/1Bm4lTwNQGWcdKCvaExh_nyCTRiVuJpF4/view?usp=drivesdk))**: Evaluates multi-cell RF clusters to prescribe **Short-Term**, **Medium-Term**, and **Long-Term** engineering interventions following the Orange tiered action ladder, and audits sectors for missing FDD frequency layers (`800`, `1800`, `2100 MHz`).
-
-## 2. Project Structure
-
-| File / Directory | Role & Description |
-| :--- | :--- |
-| [`dashboardV3.py`](https://drive.google.com/file/d/1gmT_9qXCI7x0ahHC8BgZR6nJj-J7mbus/view?usp=drivesdk) | Main application entry point; initializes the Dash server, loads external fonts/scripts (`Inter`, `html2canvas`), registers callbacks, and starts the web app. |
-| [`config.py`](https://drive.google.com/file/d/1AiqHwahSIyQn16oqgUWwe7yteZxK13PF/view?usp=drivesdk) | Central configuration for dataset paths, default KPI selections, P0/P1 thresholds, TA/frequency sector geometry rules, and UI design tokens. |
-| [`precompute.py`](https://drive.google.com/file/d/1sCeZUCXHLqYv8vJsuNb7-j2IQyXOeuV8/view?usp=drivesdk) | Startup data loader and precomputation engine; builds in-memory KPI DataFrames (`DF`, `CELL_SUMMARY_DF`), sector polygons (`CELL_POLYGONS`), site metadata (`SITE_SUMMARY`), and LRU filter caches. |
-| [`lte_data_pipeline.py`](https://drive.google.com/file/d/1tKlOOZYsB8bSX8xfTYnp5sQSC2-KCcSv/view?usp=drivesdk) | 6-stage CLI and programmatic data cleaning pipeline converting raw KPI & cell plan CSVs into `datasets/final_kpi_data.csv` and `datasets/final_info_data.csv`. |
-| [`congestion_engine.py`](https://drive.google.com/file/d/1UIv8f6Sc5BFSGJNnW66gf7GPB7hVToMt/view?usp=drivesdk) | Core congestion scoring and persistence engine (`replace` or `append` modes); writes `kpi_with_congestion.csv`, `busy_hours_by_cell_day.csv`, and `cell_congestion_summary.csv`. |
-| [`build_cell_neighbors.py`](https://drive.google.com/file/d/1fGPhNyTwdloSwBkBu1h0vCPfOY2tHLqs/view?usp=drivesdk) | Standalone spatial adjacency script using a Haversine `BallTree` to classify cell pairs (`co_site_same_freq`, `facing_neighbor`, etc.) into `cell_neighbors.csv`. |
-| [`cluster_analyzer.py`](https://drive.google.com/file/d/1EgZn7Fj9gUvyckMhcax3cNr6CbWxd4-c/view?usp=drivesdk) | RF Cluster Analysis engine implementing the Orange tiered action ladder (`freq_balance`, `tilt_up`, `tilt_down`, `intra_site_neighbor_tilt`, `inter_site_neighbor_tilt`, `add_band`, `add_sector`, `new_site`). |
-| [`layout.py`](https://drive.google.com/file/d/1krPUClggwBhBFeVGFmbkoOkGInqfVJ13/view?usp=drivesdk) & [`callbacks.py`](https://drive.google.com/file/d/1IxNCkqURq2g6SXytu-mOMIzeqNdJ-zHQ/view?usp=drivesdk) | Main UI layout and interactive callbacks for the Global Filter Strip, KPI Analytics tab, Congestion tab, Network Map tab, and Settings tab. |
-| [`forecast_tab_layout.py`](https://drive.google.com/file/d/1mKcujqAlyOlkAizg-GlkqtBh9y6BK4YE/view?usp=drivesdk) & [`forecast_callbacks.py`](https://drive.google.com/file/d/1I_5i5RHiCB6rJxyjNruGIq2OqmLVV3zJ/view?usp=drivesdk) | UI layout and background inference/training callbacks for the **AI Forecasting** tab. |
-| [`optimizer_tab_layout.py`](https://drive.google.com/file/d/10LxeRTg0R2J5shy3O_pP181zDZ_6CjOc/view?usp=drivesdk) & [`optimizer_callbacks.py`](https://drive.google.com/file/d/1Bm4lTwNQGWcdKCvaExh_nyCTRiVuJpF4/view?usp=drivesdk) | UI layout and callbacks for the **Optimization** tab (Power/HO optimizer, RF Cluster Analysis, Missing Frequency Scanner, and Sector Browsers). |
-| [`data_utils.py`](https://drive.google.com/file/d/1Ttb9t_7Mw4nJTvy3SlyewKvbPevIRvAf/view?usp=drivesdk), [`geo_utils.py`](https://drive.google.com/file/d/1Jvb3GBZnT2GqcLrh0FLzjR90-xGwuMCi/view?usp=drivesdk), [`map_builder.py`](https://drive.google.com/file/d/1n4E0AriBwxDH2kRifyXnSYO3yffeweFw/view?usp=drivesdk), [`ui_components.py`](https://drive.google.com/file/d/1Z9bfPDId5qettIc_zWspw7hW-b93pz43/view?usp=drivesdk) | Modular helper libraries for DataFrame filtering, dynamic P0/P1 flag recomputation, vectorized sector cone math, GeoJSON construction, and KPI summary cards. |
-| [`optimizer/`](https://drive.google.com/drive/folders/1NQhNV_c78VNVbZ6xhlONGSRLlkYECQG2) | Optimization subpackage containing [`optimizer_core.py`](https://drive.google.com/file/d/12EZVMPb7Q8usyORj7dgQTY7nTVbpnjaD/view?usp=drivesdk) (BCDSA, Greedy, GA solvers), [`capacity_predictor.py`](https://drive.google.com/file/d/18wO7jDoJOu1UyfdJ5b_veNSw4BfFDVsk/view?usp=drivesdk) ($\Lambda_i$ ceiling estimator), and [`neighbor_graph.py`](https://drive.google.com/file/d/1l-1NR3gY7NYEXFdJpYH_hpnViAaIpk2V/view?usp=drivesdk) (Shapely polygon overlap builder). |
-| [`Models/`](https://drive.google.com/drive/folders/13QBrs3wAcg7vGHWGnnIxumNZQqZEhCa6) | Pre-trained XGBoost artifacts ([`xgb_prb.json`](https://drive.google.com/file/d/1-gtbIMzCWOxrNyI7RHZ4CBOSImLTuZbj/view?usp=drivesdk), [`xgb_users.json`](https://drive.google.com/file/d/1RJZfTridLcZNw0UKodnHoD6uJBVtCGSd/view?usp=drivesdk), [`xgb_throughput.json`](https://drive.google.com/file/d/1t94stosh0UIw658n936FcRUYSjcfApR0/view?usp=drivesdk)), `StandardScaler` pickles ([`scaler_prb.pkl`](https://drive.google.com/file/d/1-TDZpujySYyRyZJ8EKwbwreradrKZ0jX/view?usp=drivesdk), [`scaler_users.pkl`](https://drive.google.com/file/d/1dx4IeUz1Z77U3y_1NZg-KKMR9BrqFQDK/view?usp=drivesdk), [`scaler_throughput.pkl`](https://drive.google.com/file/d/1hnvNnV4EQu2NgsNcaUsoZOisbxEk8Rko/view?usp=drivesdk)), categorical metadata ([`meta.json`](https://drive.google.com/file/d/1fe_J9u6maN-VzGnHhJr4Ekg20m6xwnbO/view?usp=drivesdk)), and [`train_xgboost.py`](https://drive.google.com/file/d/1dxwzgRLggcaznhp7oQsjxzAw3QFodrR6/view?usp=drivesdk). |
-| [`Model testing/`](https://drive.google.com/drive/folders/15-Hp5sp0bzCNAirdPOMB5-y-gNuOW2Th) & [`test.ipynb`](https://colab.research.google.com/drive/1Ql4LVR-I9gRTX6Ss_aBUzek25WYL5HAv?ouid=102736927496581623316) | Jupyter notebooks for model benchmarking ([`PRB_Model_Comparison.ipynb`](https://colab.research.google.com/drive/1MoQgjif-zY2y_CTNnYDg50C9fAtLqBtN?ouid=102736927496581623316), [`ActiveUsers_Model_Comparison.ipynb`](https://colab.research.google.com/drive/1FasWi3pciAQP6VvYAeUCLn39eTE0VQfJ?ouid=102736927496581623316), [`Throughput_Model_Comparison.ipynb`](https://colab.research.google.com/drive/1zPLm-yv2mzEWDab4HQgoe6o5QDxbY-4N?ouid=102736927496581623316)) and exploratory data testing. |
-| [`assets/map_functions.js`](https://drive.google.com/file/d/1MKyre-pv7OGxe_nWTt5yBfF_xlkHrPLj/view?usp=drivesdk) | Client-side JavaScript functions bound to `window.mapFunctions` for Dash Leaflet 1.x cluster rendering, sector styling, and click event propagation. |
-
-## 3. Prerequisites & Installation
+## 1. Prerequisites & Installation
 
 ### System Requirements
+
 * **Python**: `3.10+` (uses modern `X | Y` union type hints and `from __future__ import annotations`).
 * **RAM**: Minimum `4 GB` (`8 GB+` recommended when loading multi-week hourly KPI datasets).
 * **Browser**: Any modern Chromium, Firefox, or Safari browser (internet connection required for OpenStreetMap tiles, Google Fonts `Inter`, and `html2canvas` CDN script).
 
 ### Step 1: Set Up a Virtual Environment
+
 Open a terminal in the `RNQO-beta` project root directory and create an isolated Python environment:
 
 ```bash
@@ -55,6 +28,7 @@ source .venv/bin/activate
 ```
 
 ### Step 2: Install Python Dependencies
+
 Install all required packages for the dashboard, geospatial calculations, and machine learning pipelines:
 
 ```bash
@@ -71,7 +45,7 @@ pip install dash dash-leaflet plotly pandas numpy scikit-learn xgboost joblib sh
 | `shapely` | Geometric polygon intersection for cell overlap fraction matrices ($\eta_{i,j}$) in the optimizer. |
 | `openpyxl` | Optional Excel (`.xlsx` / `.xls`) file support in `data_utils.load_dataframe()`. |
 
-## 4. Data Setup & Preparation Pipeline
+## 2. Data Setup & Preparation Pipeline
 
 Notice that the `datasets/` directory and `*.csv` files are excluded from version control via [`.gitignore`](https://drive.google.com/file/d/1lKSXAHsGszTrTNSe0ldvz9-ZBIUtShst/view?usp=drivesdk). Before launching the dashboard for the first time, create a `datasets/` folder in the project root and prepare the data files using either the **CLI workflow** below or the **in-app Settings tab**.
 
@@ -94,6 +68,7 @@ Notice that the `datasets/` directory and `*.csv` files are excluded from versio
    ```bash
    mkdir -p datasets
    ```
+
 2. **Run Stage 1 — LTE Data Cleaning Pipeline ([`lte_data_pipeline.py`](https://drive.google.com/file/d/1tKlOOZYsB8bSX8xfTYnp5sQSC2-KCcSv/view?usp=drivesdk))**:
    ```bash
    python lte_data_pipeline.py \
@@ -103,11 +78,13 @@ Notice that the `datasets/` directory and `*.csv` files are excluded from versio
        --info-out "datasets/final_info_data.csv"
    ```
    *What this does*: Extracts `Region` (first 3 letters, e.g., `ARI`) and `Radio Site` (e.g., `ARI_0001`) from `Cell Name`, derives carrier frequency from the cell suffix (`h` $\rightarrow$ `1800`, `l` $\rightarrow$ `2100`, `f`/`j` $\rightarrow$ `800`, `g`/`k` $\rightarrow$ `TDD`), removes cells with $>25\%$ missing values in any core KPI, interpolates remaining gaps linearly, and filters both files to their common cell intersection.
+
 3. **Run Stage 2 — Congestion Computation Engine ([`congestion_engine.py`](https://drive.google.com/file/d/1UIv8f6Sc5BFSGJNnW66gf7GPB7hVToMt/view?usp=drivesdk))**:
    ```bash
    python -c "from congestion_engine import run_and_save; print(run_and_save('datasets/final_kpi_data.csv'))"
    ```
    *What this does*: Evaluates P0/P1 congestion rules across all hourly rows and generates `datasets/kpi_with_congestion.csv`, `datasets/busy_hours_by_cell_day.csv`, and `datasets/cell_congestion_summary.csv`.
+
 4. **(Optional) Build the Standalone Cell Neighbor Graph ([`build_cell_neighbors.py`](https://drive.google.com/file/d/1fGPhNyTwdloSwBkBu1h0vCPfOY2tHLqs/view?usp=drivesdk))**:
    ```bash
    python build_cell_neighbors.py \
@@ -117,13 +94,14 @@ Notice that the `datasets/` directory and `*.csv` files are excluded from versio
        --max_dist_m 2000 \
        --beamwidth_deg 65
    ```
+
 5. **(Optional) Train or Retrain the XGBoost Forecasting Models ([`Models/train_xgboost.py`](https://drive.google.com/file/d/1dxwzgRLggcaznhp7oQsjxzAw3QFodrR6/view?usp=drivesdk))**:
    Pre-trained models are already included in [`Models/`](https://drive.google.com/drive/folders/13QBrs3wAcg7vGHWGnnIxumNZQqZEhCa6). To retrain them on a new `final_kpi_data.csv` via CLI:
    ```bash
    python Models/train_xgboost.py
    ```
 
-## 5. Launching the Dashboard
+## 3. Launching the Dashboard
 
 Once `datasets/kpi_with_congestion.csv` and `datasets/final_info_data.csv` are in place (or even before—you can run the pipeline directly from the UI's **Settings** tab), start the Dash server from the project root:
 
@@ -137,15 +115,46 @@ python dashboardV3.py
   * A **green dot** (`● X,XXX rows · kpi_with_congestion.csv`) confirms the dataset is loaded and active.
   * A **red warning badge** (`⚠️ File not found...`) indicates you need to generate the dataset via the **⚙️ Settings** tab or CLI first.
 
+## 4. Key Capabilities
+
+* **Automated LTE Data Cleaning Pipeline ([`lte_data_pipeline.py`](https://drive.google.com/file/d/1tKlOOZYsB8bSX8xfTYnp5sQSC2-KCcSv/view?usp=drivesdk))**: Parses raw 4G KPI exports and semicolon-delimited cell plan master files, strips formatting artifacts, filters out cells with $>25\%$ missing KPI records, performs linear per-cell time-series interpolation, maps carrier frequency bands (`800 MHz`, `1800 MHz`, `2100 MHz`, `TDD`), and aligns both datasets to common cells.
+* **Persistence-Aware Congestion Engine ([`congestion_engine.py`](https://drive.google.com/file/d/1UIv8f6Sc5BFSGJNnW66gf7GPB7hVToMt/view?usp=drivesdk))**: Flags hourly **P0 (Severe)** and **P1 (Moderate)** congestion using a simultaneous 3-way threshold rule (`DL PRB Load`, `LTE DL User Throughput`, and `Active Users`), identifies daily cell busy hours, computes composite severity scores (`0–100`), and applies an ISO-week persistence rule ($\ge 4$ congested days/week across $\ge 2$ calendar weeks).
+* **Geospatial Sector & Neighbor Graph Modeling ([`geo_utils.py`](https://drive.google.com/file/d/1Jvb3GBZnT2GqcLrh0FLzjR90-xGwuMCi/view?usp=drivesdk), [`build_cell_neighbors.py`](https://drive.google.com/file/d/1fGPhNyTwdloSwBkBu1h0vCPfOY2tHLqs/view?usp=drivesdk), [`neighbor_graph.py`](https://drive.google.com/file/d/1l-1NR3gY7NYEXFdJpYH_hpnViAaIpk2V/view?usp=drivesdk))**: Generates directional sector footprints using either **Average Timing Advance (TA)** (`40 m–250 m` radius, $\pm 32^\circ$ half-angle) or **Frequency-Band Geometry** (`800/1800/2100/TDD` beamwidths and ranges), and computes pairwise Haversine/Shapely overlap matrices ($\eta_{i,j}$).
+* **AI-Powered Multi-Horizon KPI Forecasting ([`train_xgboost.py`](https://drive.google.com/file/d/1dxwzgRLggcaznhp7oQsjxzAw3QFodrR6/view?usp=drivesdk), [`forecast_callbacks.py`](https://drive.google.com/file/d/1I_5i5RHiCB6rJxyjNruGIq2OqmLVV3zJ/view?usp=drivesdk))**: Uses pre-trained **XGBoost** regressors (with automatic lag-blend fallback) to predict `DL PRB Load`, `Active Users`, and `LTE DL User Throughput` across horizons from **6 hours to 1 week (168 hours)**, complete with a **What-If Traffic Growth Simulator** (`1.0x–3.0x`) and background 7-day caching.
+* **Algorithmic Congestion Optimization ([`optimizer_core.py`](https://drive.google.com/file/d/12EZVMPb7Q8usyORj7dgQTY7nTVbpnjaD/view?usp=drivesdk), [`capacity_predictor.py`](https://drive.google.com/file/d/18wO7jDoJOu1UyfdJ5b_veNSw4BfFDVsk/view?usp=drivesdk))**: Recommends discrete per-cell transmit power reductions ($\Delta\wp \in \{0, 1, 2, 3\}\text{ dB}$) and handover margin increases ($\Delta\hbar \in \{0, 1, 2, 3\}\text{ dB}$) using **BCDSA** (Block-Coordinate Descent with Simulated Annealing), **Greedy Descent**, or a **Genetic Algorithm (GA)** on either current or forecasted network states.
+* **RF Cluster Analysis & Missing Band Scanner ([`cluster_analyzer.py`](https://drive.google.com/file/d/1EgZn7Fj9gUvyckMhcax3cNr6CbWxd4-c/view?usp=drivesdk), [`optimizer_callbacks.py`](https://drive.google.com/file/d/1Bm4lTwNQGWcdKCvaExh_nyCTRiVuJpF4/view?usp=drivesdk))**: Evaluates multi-cell RF clusters to prescribe **Short-Term**, **Medium-Term**, and **Long-Term** engineering interventions following the Orange tiered action ladder, and audits sectors for missing FDD frequency layers (`800`, `1800`, `2100 MHz`).
+
+## 5. Project Structure
+
+| File / Directory | Role & Description |
+| :--- | :--- |
+| [`dashboardV3.py`](https://drive.google.com/file/d/1gmT_9qXCI7x0ahHC8BgZR6nJj-J7mbus/view?usp=drivesdk) | Main application entry point; initializes the Dash server, loads external fonts/scripts (`Inter`, `html2canvas`), registers callbacks, and starts the web app. |
+| [`config.py`](https://drive.google.com/file/d/1AiqHwahSIyQn16oqgUWwe7yteZxK13PF/view?usp=drivesdk) | Central configuration for dataset paths, default KPI selections, P0/P1 thresholds, TA/frequency sector geometry rules, and UI design tokens. |
+| [`precompute.py`](https://drive.google.com/file/d/1sCeZUCXHLqYv8vJsuNb7-j2IQyXOeuV8/view?usp=drivesdk) | Startup data loader and precomputation engine; builds in-memory KPI DataFrames (`DF`, `CELL_SUMMARY_DF`), sector polygons (`CELL_POLYGONS`), site metadata (`SITE_SUMMARY`), and LRU filter caches. |
+| [`lte_data_pipeline.py`](https://drive.google.com/file/d/1tKlOOZYsB8bSX8xfTYnp5sQSC2-KCcSv/view?usp=drivesdk) | 6-stage CLI and programmatic data cleaning pipeline converting raw KPI & cell plan CSVs into `datasets/final_kpi_data.csv` and `datasets/final_info_data.csv`. |
+| [`congestion_engine.py`](https://drive.google.com/file/d/1UIv8f6Sc5BFSGJNnW66gf7GPB7hVToMt/view?usp=drivesdk) | Core congestion scoring and persistence engine (`replace` or `append` modes); writes `kpi_with_congestion.csv`, `busy_hours_by_cell_day.csv`, and `cell_congestion_summary.csv`. |
+| [`build_cell_neighbors.py`](https://drive.google.com/file/d/1fGPhNyTwdloSwBkBu1h0vCPfOY2tHLqs/view?usp=drivesdk) | Standalone spatial adjacency script using a Haversine `BallTree` to classify cell pairs (`co_site_same_freq`, `facing_neighbor`, etc.) into `cell_neighbors.csv`. |
+| [`cluster_analyzer.py`](https://drive.google.com/file/d/1EgZn7Fj9gUvyckMhcax3cNr6CbWxd4-c/view?usp=drivesdk) | RF Cluster Analysis engine implementing the Orange tiered action ladder (`freq_balance`, `tilt_up`, `tilt_down`, `intra_site_neighbor_tilt`, `inter_site_neighbor_tilt`, `add_band`, `add_sector`, `new_site`). |
+| [`layout.py`](https://drive.google.com/file/d/1krPUClggwBhBFeVGFmbkoOkGInqfVJ13/view?usp=drivesdk) & [`callbacks.py`](https://drive.google.com/file/d/1IxNCkqURq2g6SXytu-mOMIzeqNdJ-zHQ/view?usp=drivesdk) | Main UI layout and interactive callbacks for the Global Filter Strip, KPI Analytics tab, Congestion tab, Network Map tab, and Settings tab. |
+| [`forecast_tab_layout.py`](https://drive.google.com/file/d/1mKcujqAlyOlkAizg-GlkqtBh9y6BK4YE/view?usp=drivesdk) & [`forecast_callbacks.py`](https://drive.google.com/file/d/1I_5i5RHiCB6rJxyjNruGIq2OqmLVV3zJ/view?usp=drivesdk) | UI layout and background inference/training callbacks for the **AI Forecasting** tab. |
+| [`optimizer_tab_layout.py`](https://drive.google.com/file/d/10LxeRTg0R2J5shy3O_pP181zDZ_6CjOc/view?usp=drivesdk) & [`optimizer_callbacks.py`](https://drive.google.com/file/d/1Bm4lTwNQGWcdKCvaExh_nyCTRiVuJpF4/view?usp=drivesdk) | UI layout and callbacks for the **Optimization** tab (Power/HO optimizer, RF Cluster Analysis, Missing Frequency Scanner, and Sector Browsers). |
+| [`data_utils.py`](https://drive.google.com/file/d/1Ttb9t_7Mw4nJTvy3SlyewKvbPevIRvAf/view?usp=drivesdk), [`geo_utils.py`](https://drive.google.com/file/d/1Jvb3GBZnT2GqcLrh0FLzjR90-xGwuMCi/view?usp=drivesdk), [`map_builder.py`](https://drive.google.com/file/d/1n4E0AriBwxDH2kRifyXnSYO3yffeweFw/view?usp=drivesdk), [`ui_components.py`](https://drive.google.com/file/d/1Z9bfPDId5qettIc_zWspw7hW-b93pz43/view?usp=drivesdk) | Modular helper libraries for DataFrame filtering, dynamic P0/P1 flag recomputation, vectorized sector cone math, GeoJSON construction, and KPI summary cards. |
+| [`optimizer/`](https://drive.google.com/drive/folders/1NQhNV_c78VNVbZ6xhlONGSRLlkYECQG2) | Optimization subpackage containing [`optimizer_core.py`](https://drive.google.com/file/d/12EZVMPb7Q8usyORj7dgQTY7nTVbpnjaD/view?usp=drivesdk) (BCDSA, Greedy, GA solvers), [`capacity_predictor.py`](https://drive.google.com/file/d/18wO7jDoJOu1UyfdJ5b_veNSw4BfFDVsk/view?usp=drivesdk) ($\Lambda_i$ ceiling estimator), and [`neighbor_graph.py`](https://drive.google.com/file/d/1l-1NR3gY7NYEXFdJpYH_hpnViAaIpk2V/view?usp=drivesdk) (Shapely polygon overlap builder). |
+| [`Models/`](https://drive.google.com/drive/folders/13QBrs3wAcg7vGHWGnnIxumNZQqZEhCa6) | Pre-trained XGBoost artifacts ([`xgb_prb.json`](https://drive.google.com/file/d/1-gtbIMzCWOxrNyI7RHZ4CBOSImLTuZbj/view?usp=drivesdk), [`xgb_users.json`](https://drive.google.com/file/d/1RJZfTridLcZNw0UKodnHoD6uJBVtCGSd/view?usp=drivesdk), [`xgb_throughput.json`](https://drive.google.com/file/d/1t94stosh0UIw658n936FcRUYSjcfApR0/view?usp=drivesdk)), `StandardScaler` pickles ([`scaler_prb.pkl`](https://drive.google.com/file/d/1-TDZpujySYyRyZJ8EKwbwreradrKZ0jX/view?usp=drivesdk), [`scaler_users.pkl`](https://drive.google.com/file/d/1dx4IeUz1Z77U3y_1NZg-KKMR9BrqFQDK/view?usp=drivesdk), [`scaler_throughput.pkl`](https://drive.google.com/file/d/1hnvNnV4EQu2NgsNcaUsoZOisbxEk8Rko/view?usp=drivesdk)), categorical metadata ([`meta.json`](https://drive.google.com/file/d/1fe_J9u6maN-VzGnHhJr4Ekg20m6xwnbO/view?usp=drivesdk)), and [`train_xgboost.py`](https://drive.google.com/file/d/1dxwzgRLggcaznhp7oQsjxzAw3QFodrR6/view?usp=drivesdk). |
+| [Model testing/](https://www.google.com/search?q=https://drive.google.com/drive/folders/15-Hp5sp0bzCNAirdPOMB5-y-gNuOW2Th) & [test.ipynb](https://www.google.com/search?q=https://colab.research.google.com/drive/1Ql4LVR-I9gRTX6Ss_aBUzek25WYL5HAv%3Fouid%3D102736927496581623316) | Jupyter notebooks for model benchmarking ([PRB\_Model\_Comparison.ipynb](https://www.google.com/search?q=https://colab.research.google.com/drive/1MoQgjif-zY2y_CTNnYDg50C9fAtLqBtN%3Fouid%3D102736927496581623316), [ActiveUsers\_Model\_Comparison.ipynb](https://www.google.com/search?q=https://colab.research.google.com/drive/1FasWi3pciAQP6VvYAeUCLn39eTE0VQfJ%3Fouid%3D102736927496581623316), [Throughput\_Model\_Comparison.ipynb](https://www.google.com/search?q=https://colab.research.google.com/drive/1zPLm-yv2mzEWDab4HQgoe6o5QDxbY-4N%3Fouid%3D102736927496581623316)) and exploratory data testing. |
+| [`assets/map_functions.js`](https://drive.google.com/file/d/1MKyre-pv7OGxe_nWTt5yBfF_xlkHrPLj/view?usp=drivesdk) | Client-side JavaScript functions bound to `window.mapFunctions` for Dash Leaflet 1.x cluster rendering, sector styling, and click event propagation. |
+
 ## 6. Complete User Guide: How to Use Every Feature
 
 ### Global Filter Strip & Summary Cards (Top Bar)
+
 Located directly below the main header, the **Global Filter Strip** controls the active scope across the dashboard:
 * **Dimension Filters (Row 1)**: Filter hierarchically by **Region**, **Radio Site**, **Cell Name**, **FDD / TDD** mode, and **Date Range**. Selecting a Region automatically narrows the available Radio Sites and Cells.
 * **KPI Selectors (Row 2)**: Choose up to three metrics (**KPI Panel 1**, **KPI Panel 2**, **KPI Panel 3**—defaults: `DL PRB Load`, `DL Avg Throughput`, `Active Users`) to drive the time-series charts in the KPI Analytics tab.
 * **Headline KPI Cards**: Displays 5 real-time metrics for the current filter selection: **Rows**, **Regions**, **Sites**, **Cells**, and **Avg DL PRB (%)**.
 
 ### Tab 1: 📊 KPI Analytics
+
 Designed for exploratory radio performance analysis across the filtered cells and date window:
 1. **Multi-Panel Time-Series Charts**:
    * **Top Chart**: Plots **KPI Panel 1** over time.
@@ -160,6 +169,7 @@ Designed for exploratory radio performance analysis across the filtered cells an
    * Native sorting, column filtering, pagination (`20` rows/page), and one-click **Export** (`CSV`) for the active slice.
 
 ### Tab 2: 🔥 Congestion
+
 Provides deep-dive diagnostics into **P0 (Severe)** and **P1 (Moderate)** network congestion:
 * **Congestion Classification Logic**:
   * **P0 (Severe — Red)**: `DL PRB Load > 90%` **AND** `LTE DL User Throughput < 2,000 kbps` **AND** `Active Users > 8`.
@@ -173,10 +183,11 @@ Provides deep-dive diagnostics into **P0 (Severe)** and **P1 (Moderate)** networ
   * **Congested Scatter Plot & Summary Table**: Displays a color-coded per-cell summary table sorted by `FinalCongestionScore` with native CSV export.
 
 ### Tab 3: 🗺️ Network Map
+
 An interactive geospatial analysis environment built with **Dash Leaflet**:
 1. **Zoom-Adaptive Clustering & Sector Cones**:
    * At zoom levels `< 15`, sites are grouped into dynamic **SuperCluster** markers colored by worst site congestion level (`P0`, `P1`, `Not Congested`).
-   * Zooming in to **zoom $\ge 15$** automatically reveals individual directional **sector cones** oriented along each cell's `Azimuth`.
+   * Zooming in to **zoom** $\ge 15$ automatically reveals individual directional **sector cones** oriented along each cell's `Azimuth`.
 2. **Map Toolbar Controls**:
    * **Hour-of-Day Animation (`▶` / Slider / `↺`)**: Step through hours `00:00` to `23:00` manually or press `▶` to animate hourly network load shifts every `900 ms`.
    * **`📡 Freq Shape` Toggle**: Switches sector cone geometry between **Approach 1 (Timing Advance)**—where cone radius scales dynamically between `40 m` and `250 m` from `Average Timing Advance` with a fixed $\pm 32^\circ$ half-angle—and **Approach 2 (Frequency Band)**, which renders realistic band-specific footprints:
@@ -189,6 +200,7 @@ An interactive geospatial analysis environment built with **Dash Leaflet**:
    * **Side Inspector Panel & PNG Export**: Click any site marker or sector cone to view its detailed metadata, azimuth, TA range, and KPI breakdown in the right-hand side panel. Click **`📷 PNG`** to capture the map view via `html2canvas`, or **`↺ Reset`** to clear map selections.
 
 ### Tab 4: 🔮 AI Forecasting
+
 Predicts future cell KPIs and congestion bottlenecks using the trained XGBoost pipeline (or automatic historical lag-blending when a cell is unseen):
 1. **Select Scope & Horizon**:
    * Use the **Global Filter Strip** at the top of the page to choose the target Region, Site, or Cells.
@@ -206,9 +218,11 @@ Predicts future cell KPIs and congestion bottlenecks using the trained XGBoost p
    * **🚨 Forecasted Congestion Alert Table**: Ranks all cells predicted to experience congestion by severity.
 
 ### Tab 5: 🎯 Optimization
+
 A comprehensive RF engineering workbench divided into five specialized sections:
 
 #### Section A: Algorithmic Congestion Optimization (Power & Handover Margin)
+
 Redistributes excess active users ($\lambda_i > \Lambda_i$) from congested cells to healthy overlapping neighbors by recommending per-cell **transmit power reductions** ($\Delta\wp_i \in \{0, 1, 2, 3\}\text{ dB}$) and **handover margin increases** ($\Delta\hbar_i \in \{0, 1, 2, 3\}\text{ dB}$) subject to a minimum SINR quality constraint ($Q_{\min} = -3.0\text{ dB}$) and path-loss exponent ($H = 40.0$):
 1. **Pick a Region** (or `All regions`).
 2. **Choose Mode**:
@@ -223,6 +237,7 @@ Redistributes excess active users ($\lambda_i > \Lambda_i$) from congested cells
    * Toggle the interactive Leaflet map between **Before** and **After** states, inspect the per-cell **Recommendations Table** (`delta_p_db`, `delta_h_db`, `own_offload`, `handover_offload`, `status`), and review the **Top Relieved Cells** bar chart.
 
 #### Section B: 🔭 RF Cluster Analysis (Orange Tiered Action Ladder)
+
 Evaluates all cells in the **Global Filter Strip** as an interconnected RF cluster:
 1. Set the **Neighbour search radius** slider (`500 m` to `5 km`, default `2 km`) and click **`🔭 Analyse Cluster`**.
 2. Inspect the **Cluster Topology Grid** (one row per site with color-coded frequency/PRB chips for every sector and cell).
@@ -239,12 +254,14 @@ Evaluates all cells in the **Global Filter Strip** as an interconnected RF clust
 | **🔴 Long-Term** | `new_site` | Densify the cluster with a new macro site when $\ge 2$ sectors on a site are chronically congested with no healthy neighbor relief. | **90%** |
 
 #### Sections C, D & E: 📻 Missing Frequency Band Scanner & Sector Browsers
+
 1. Choose **Scan scope** (`Current filter` or `Whole network`) and click **`📻 Scan Missing Frequencies`**.
 2. **Missing Frequency Analysis**: Identifies sectors missing `800 MHz`, `1800 MHz`, or `2100 MHz` carriers (grouping cells into physical sectors using a $30^\circ$ azimuth tolerance), displays regional stacked bar charts and band gap pie charts, and provides a full exportable table.
 3. **📶 Congested Sector Browser & Detail Table**: Breaks down `P0` and `P1` congested physical sectors by frequency band and region, with a dedicated CSV export for congested sectors.
 4. **🗂️ Sector Distribution Overview**: Summarizes total physical sector counts across all congestion tiers by band and region.
 
 ### Tab 6: ⚙️ Settings
+
 Allows you to manage datasets, customize congestion definitions, and retrain ML models directly from the browser without touching the command line:
 1. **🔧 Run Data Pipeline**: Point to your raw KPI CSV and Config Master CSV paths and click **`🔧 Run Pipeline & Compute`**. This runs `lte_data_pipeline.py` followed immediately by `congestion_engine.py`.
 2. **📂 Dataset Status**: Real-time verification of whether `kpi_with_congestion.csv`, `final_kpi_data.csv`, and `LTE_cell_Plan_HU_MasterFile.csv` are present on disk.
@@ -258,6 +275,6 @@ Allows you to manage datasets, customize congestion definitions, and retrain ML 
 * **Windows vs. Linux/macOS Path Separators in Settings**:
   * Some default input boxes in the Settings tab use Windows backslashes (`datasets\LTE_cell_Plan_HU_MasterFile.csv`). If running on Linux or macOS, replace the backslash with a forward slash (`datasets/LTE_cell_Plan_HU_MasterFile.csv`) in the text input before clicking Run.
 * **Sector Cones Not Visible on the Network Map**:
-  * By design, individual sector polygons only render at **Leaflet zoom level $\ge 15$** (`SECTOR_ZOOM_THRESHOLD = 15` in `config.py`) to keep map rendering fast across thousands of cells. Click a site cluster marker or zoom in to level 15+ to inspect sector cones.
+  * By design, individual sector polygons only render at **Leaflet zoom level** $\ge 15$ (`SECTOR_ZOOM_THRESHOLD = 15` in `config.py`) to keep map rendering fast across thousands of cells. Click a site cluster marker or zoom in to level 15+ to inspect sector cones.
 * **Optimizer "Forecast" Mode Shows an Error**:
   * Forecast mode in the **🎯 Optimization** tab reads predictions from the **🔮 AI Forecasting** tab's session store (`fc-forecast-store`). Navigate to **🔮 AI Forecasting**, click **`▶ Run Forecast`** (or load a saved week forecast), and then return to **🎯 Optimization**.
