@@ -40,7 +40,7 @@ REQUIRED_COLS = [COL_TIME, COL_CELL, COL_PRB, COL_USERS, COL_THP]
 
 # ── Persistence thresholds (new rule) ─────────────────────────────────────────
 MIN_CONGESTED_DAYS_PER_WEEK = 4   # distinct days-of-week in a single ISO week
-MIN_CONGESTED_WEEKS         = 3   # calendar weeks that must show that pattern
+MIN_CONGESTED_WEEKS         = 2   # calendar weeks that must show that pattern
 
 # ── Defaults (matching the original congestion.py) ────────────────────────────
 DEFAULT_THRESHOLDS: dict = {

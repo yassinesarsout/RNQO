@@ -322,10 +322,12 @@ def prepare_info_dataframe(conf_data: pd.DataFrame) -> pd.DataFrame:
 
     conf_data = conf_data.copy()
 
-    # Region & Radio Site
-    conf_data["Region"], conf_data["Radio Site"] = _extract_region_and_site(
-        conf_data[CELL_COL]
-    )
+    # # Region & Radio Site
+    # conf_data["Region"], conf_data["Radio Site"] = _extract_region_and_site(
+    #     conf_data[CELL_COL]
+    # )
+
+    ### to do add sector id from cell name
 
     # Frequency band derived from the last segment of the Cell Name
     conf_data["cell_id"] = conf_data[CELL_COL].str.extract(r"_([^_]+)$")

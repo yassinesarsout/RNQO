@@ -879,6 +879,251 @@ def build_optimizer_tab() -> dcc.Tab:
                 "marginBottom": "16px", "overflow": "hidden",
             }),
 
+            # ── Congested Sectors Analysis ────────────────────────────────────
+
+            # Divider
+            html.Div([
+                html.Div(style={
+                    "flex": 1,
+                    "height": "1px",
+                    "background": "linear-gradient(to right, transparent, #f87171, transparent)",
+                }),
+                html.Span("Congested Sector Analysis", style={
+                    "fontSize": "11px", "fontWeight": 700,
+                    "color": "#b91c1c", "padding": "0 16px",
+                    "textTransform": "uppercase", "letterSpacing": "1px",
+                    "whiteSpace": "nowrap",
+                }),
+                html.Div(style={
+                    "flex": 1,
+                    "height": "1px",
+                    "background": "linear-gradient(to right, #f87171, transparent)",
+                }),
+            ], style={
+                "display": "flex", "alignItems": "center",
+                "margin": "28px 0 20px 0",
+            }),
+
+            # Header card
+            html.Div([
+                html.H2("📶  Congested Sector Browser",
+                        style={"margin": "0 0 4px 0", "color": TEXT_PRIMARY,
+                               "fontSize": "18px"}),
+                html.P(
+                    "Groups every sector using the same azimuth-bucketing logic as the "
+                    "Missing Frequency Scanner, then classifies each sector as P0 (severe) "
+                    "or P1 (moderate) based on its cells' congestion level in DF. "
+                    "Two charts are shown: sector counts broken down by congestion level "
+                    "per frequency band, and the same breakdown per region. "
+                    "Click 'Scan Missing Frequencies' above to populate both charts.",
+                    style={"margin": 0, "color": TEXT_MUTED, "fontSize": "13px",
+                           "lineHeight": "1.6"},
+                ),
+            ], style={
+                "padding": "16px 20px",
+                "background": "white",
+                "border": "1px solid #fca5a555",
+                "borderRadius": "16px",
+                "borderLeft": "4px solid #ef4444",
+                "marginBottom": "16px",
+            }),
+
+            # Charts row — congested sectors per frequency  +  per region
+            html.Div([
+                html.Div([
+                    html.Div("Congested sectors per frequency band",
+                             style={"fontWeight": 600, "fontSize": "13px",
+                                    "padding": "12px 16px",
+                                    "borderBottom": f"1px solid {BORDER_COLOR}"}),
+                    dcc.Loading(
+                        type="dot", color="#ef4444",
+                        children=dcc.Graph(
+                            id="csa-freq-chart",
+                            config={"displayModeBar": False},
+                            style={"minHeight": "300px"},
+                        ),
+                    ),
+                ], style={
+                    "flex": 1, "minWidth": "340px",
+                    "background": SURFACE, "borderRadius": "12px",
+                    "border": f"1px solid {BORDER_COLOR}",
+                }),
+                html.Div([
+                    html.Div("Congested sectors per region",
+                             style={"fontWeight": 600, "fontSize": "13px",
+                                    "padding": "12px 16px",
+                                    "borderBottom": f"1px solid {BORDER_COLOR}"}),
+                    dcc.Loading(
+                        type="dot", color="#ef4444",
+                        children=dcc.Graph(
+                            id="csa-region-chart",
+                            config={"displayModeBar": False},
+                            style={"minHeight": "300px"},
+                        ),
+                    ),
+                ], style={
+                    "flex": 1, "minWidth": "340px",
+                    "background": SURFACE, "borderRadius": "12px",
+                    "border": f"1px solid {BORDER_COLOR}",
+                }),
+            ], style={
+                "display": "flex", "gap": "16px",
+                "marginBottom": "16px", "flexWrap": "wrap",
+            }),
+
+            # ── All-Sector Distribution ───────────────────────────────────────
+
+            # Divider
+            html.Div([
+                html.Div(style={
+                    "flex": 1,
+                    "height": "1px",
+                    "background": "linear-gradient(to right, transparent, #6366f1, transparent)",
+                }),
+                html.Span("All-Sector Distribution", style={
+                    "fontSize": "11px", "fontWeight": 700,
+                    "color": "#4338ca", "padding": "0 16px",
+                    "textTransform": "uppercase", "letterSpacing": "1px",
+                    "whiteSpace": "nowrap",
+                }),
+                html.Div(style={
+                    "flex": 1,
+                    "height": "1px",
+                    "background": "linear-gradient(to right, #6366f1, transparent)",
+                }),
+            ], style={
+                "display": "flex", "alignItems": "center",
+                "margin": "28px 0 20px 0",
+            }),
+
+            # Header card
+            html.Div([
+                html.H2("🗂️  Sector Distribution Overview",
+                        style={"margin": "0 0 4px 0", "color": TEXT_PRIMARY,
+                               "fontSize": "18px"}),
+                html.P(
+                    "Shows the total number of sectors (all congestion levels) "
+                    "grouped by frequency band and by region. Uses the same "
+                    "azimuth-bucketing logic as the Missing Frequency Scanner. "
+                    "Run 'Scan Missing Frequencies' above to populate.",
+                    style={"margin": 0, "color": TEXT_MUTED, "fontSize": "13px",
+                           "lineHeight": "1.6"},
+                ),
+            ], style={
+                "padding": "16px 20px",
+                "background": "white",
+                "border": "1px solid #a5b4fc55",
+                "borderRadius": "16px",
+                "borderLeft": "4px solid #6366f1",
+                "marginBottom": "16px",
+            }),
+
+            # Charts row — all sectors per frequency  +  per region
+            html.Div([
+                html.Div([
+                    html.Div("All sectors per frequency band",
+                             style={"fontWeight": 600, "fontSize": "13px",
+                                    "padding": "12px 16px",
+                                    "borderBottom": f"1px solid {BORDER_COLOR}"}),
+                    dcc.Loading(
+                        type="dot", color="#6366f1",
+                        children=dcc.Graph(
+                            id="asa-freq-chart",
+                            config={"displayModeBar": False},
+                            style={"minHeight": "300px"},
+                        ),
+                    ),
+                ], style={
+                    "flex": 1, "minWidth": "340px",
+                    "background": SURFACE, "borderRadius": "12px",
+                    "border": f"1px solid {BORDER_COLOR}",
+                }),
+                html.Div([
+                    html.Div("All sectors per region",
+                             style={"fontWeight": 600, "fontSize": "13px",
+                                    "padding": "12px 16px",
+                                    "borderBottom": f"1px solid {BORDER_COLOR}"}),
+                    dcc.Loading(
+                        type="dot", color="#6366f1",
+                        children=dcc.Graph(
+                            id="asa-region-chart",
+                            config={"displayModeBar": False},
+                            style={"minHeight": "300px"},
+                        ),
+                    ),
+                ], style={
+                    "flex": 1, "minWidth": "340px",
+                    "background": SURFACE, "borderRadius": "12px",
+                    "border": f"1px solid {BORDER_COLOR}",
+                }),
+            ], style={
+                "display": "flex", "gap": "16px",
+                "marginBottom": "16px", "flexWrap": "wrap",
+            }),
+
+            # ── Congested Sector Detail Table ─────────────────────────────────
+
+            # Divider
+            html.Div([
+                html.Div(style={
+                    "flex": 1,
+                    "height": "1px",
+                    "background": "linear-gradient(to right, transparent, #f87171, transparent)",
+                }),
+                html.Span("Congested Sector Detail", style={
+                    "fontSize": "11px", "fontWeight": 700,
+                    "color": "#b91c1c", "padding": "0 16px",
+                    "textTransform": "uppercase", "letterSpacing": "1px",
+                    "whiteSpace": "nowrap",
+                }),
+                html.Div(style={
+                    "flex": 1,
+                    "height": "1px",
+                    "background": "linear-gradient(to right, #f87171, transparent)",
+                }),
+            ], style={
+                "display": "flex", "alignItems": "center",
+                "margin": "28px 0 20px 0",
+            }),
+
+            # Table card
+            html.Div([
+                # Header row
+                html.Div([
+                    html.Span("📋  Congested sector detail",
+                              style={"fontWeight": 700, "fontSize": "14px",
+                                     "color": TEXT_PRIMARY}),
+                    html.Span(id="cst-table-count",
+                              style={"fontSize": "11px", "color": TEXT_MUTED,
+                                     "marginLeft": "8px"}),
+                    html.Div(style={"flex": 1}),
+                    html.Button(
+                        "⬇  Export CSV",
+                        id="cst-export-btn", n_clicks=0,
+                        style={
+                            **_PILL_BTN,
+                            "fontSize": "12px", "padding": "6px 16px",
+                        },
+                    ),
+                    dcc.Download(id="cst-download"),
+                ], style={
+                    "display": "flex", "alignItems": "center",
+                    "padding": "12px 16px",
+                    "borderBottom": f"1px solid {BORDER_COLOR}",
+                    "gap": "6px",
+                }),
+                dcc.Loading(
+                    type="dot", color="#ef4444",
+                    children=html.Div(id="cst-table-wrap"),
+                ),
+            ], style={
+                "background": SURFACE, "borderRadius": "12px",
+                "border": f"1px solid {BORDER_COLOR}",
+                "marginBottom": "16px", "overflow": "hidden",
+            }),
+
+            dcc.Store(id="cst-table-store", data=[]),
+
             # Hidden store for missing-freq results
             dcc.Store(id="mfa-results-store", data=None),
             # Holds exactly what the table shows — used by the export button

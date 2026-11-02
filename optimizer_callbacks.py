@@ -1906,3 +1906,557 @@ def rfa_update_recommendations(result, search_text, action_filter,
     )
 
     return short_panel, medium_panel, long_panel, count_full, export_bar, banner
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── CONGESTED SECTOR ANALYSIS (CSA) ──────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# These two callbacks reuse _mfa_group_sectors() to build the same sector
+# topology (site × azimuth-bucket) used by the Missing Frequency scanner, then
+# overlay CongestionLevel from DF.  Each sector is classified:
+#
+#   P0  — at least one cell in the sector has CongestionLevel == "P0"
+#   P1  — no P0 cell, but at least one cell has CongestionLevel == "P1"
+#   (healthy / no_data sectors are not counted)
+#
+# The two charts show the same data sliced two ways:
+#   1. csa-freq-chart   → x = frequency band (800 / 1800 / 2100), colour = P0/P1
+#   2. csa-region-chart → x = region,          colour = P0/P1
+#
+# Both are driven by the existing mfa-results-store so they update automatically
+# whenever the user runs "Scan Missing Frequencies".
+
+_CSA_LEVEL_COLORS = {
+    "P0": "#ef4444",   # red   — severe
+    "P1": "#f97316",   # orange — moderate
+}
+_CSA_LEVELS = ["P0", "P1"]   # draw P0 first so it stacks below P1
+
+
+def _csa_classify_sectors(sectors: list[dict]) -> list[dict]:
+    """
+    Enrich each sector dict with a 'congestion_level' key ('P0', 'P1', or
+    'healthy') derived from DF, using the same cell-level logic as
+    cluster_analyzer._cell_stats().
+
+    Only cells present in DF are considered.  If none of the sector's cells
+    appear in DF the sector is tagged 'no_data' and excluded from the charts.
+    """
+    if DF is None or DF.empty or "Cell Name" not in DF.columns:
+        # No KPI data at all — mark everything no_data
+        return [{**s, "congestion_level": "no_data"} for s in sectors]
+
+    # Build a fast {cell_name: congestion_level} lookup from DF.
+    # We use the pre-normalised CongestionLevel column if present, otherwise
+    # fall back to the P0/P1 boolean columns used by _cell_stats().
+    if "CongestionLevel" in DF.columns:
+        level_map: dict[str, str] = (
+            DF.drop_duplicates("Cell Name")
+              .set_index("Cell Name")["CongestionLevel"]
+              .fillna("healthy")
+              .to_dict()
+        )
+        # normalise stored strings to P0 / P1 / healthy
+        def _norm(v: str) -> str:
+            v = str(v).strip().upper()
+            if v == "P0":  return "P0"
+            if v == "P1":  return "P1"
+            return "healthy"
+        level_map = {k: _norm(v) for k, v in level_map.items()}
+    else:
+        # Fall back: any row with P0_Congestion True → P0, P1 True → P1
+        has_p0 = "P0_Congestion" in DF.columns
+        has_p1 = "P1_Congestion" in DF.columns
+        level_map = {}
+        for cn, grp in DF.groupby("Cell Name"):
+            p0 = bool(grp["P0_Congestion"].any()) if has_p0 else False
+            p1 = bool(grp["P1_Congestion"].any()) if has_p1 else False
+            level_map[str(cn)] = "P0" if p0 else ("P1" if p1 else "healthy")
+
+    enriched = []
+    for s in sectors:
+        # Sector-level level = worst level across its cells.
+        worst = "healthy"
+        has_data = False
+        for cn in s.get("cell_names", []):
+            lv = level_map.get(cn)
+            if lv is None:
+                continue
+            has_data = True
+            if lv == "P0":
+                worst = "P0"
+                break           # can't get worse
+            if lv == "P1" and worst != "P0":
+                worst = "P1"
+        enriched.append({
+            **s,
+            "congestion_level": worst if has_data else "no_data",
+        })
+    return enriched
+
+
+def _csa_empty_fig(msg: str = "Click 'Scan Missing Frequencies' to populate") -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(
+        text=msg, x=0.5, y=0.5,
+        xref="paper", yref="paper",
+        showarrow=False,
+        font={"size": 13, "color": TEXT_MUTED},
+    )
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis={"visible": False}, yaxis={"visible": False},
+        margin={"t": 10, "b": 10, "l": 10, "r": 10},
+        height=300,
+    )
+    return fig
+
+
+# ── CSA CALLBACK 1: congested sectors per frequency band ──────────────────────
+@callback(
+    Output("csa-freq-chart", "figure"),
+    Input("mfa-results-store", "data"),
+)
+def csa_update_freq_chart(store):
+    """
+    Stacked bar: x = frequency band (800 / 1800 / 2100), y = number of congested
+    sectors, colour = congestion level (P0 / P1).
+
+    Sector grouping is identical to _mfa_group_sectors(); congestion level is
+    overlaid from DF.  Only sectors whose worst-cell level is P0 or P1 are
+    included.
+
+    Each sector contributes its *frequency* via the cells it contains.  Because
+    a sector may hold cells of multiple bands (e.g. 800 + 1800 on the same
+    azimuth) we attribute the sector to every band it has — consistent with how
+    _mfa_group_sectors reports present_bands.
+    """
+    if not store or not store.get("sectors"):
+        return _csa_empty_fig()
+
+    raw_sectors = store["sectors"]
+    sectors = _csa_classify_sectors(raw_sectors)
+
+    # Keep only genuinely congested sectors
+    congested = [s for s in sectors if s["congestion_level"] in _CSA_LEVELS]
+    if not congested:
+        return _csa_empty_fig("✅  No congested sectors found in the current scan!")
+
+    from collections import defaultdict
+    # (band, level) → sector count
+    # A sector is attributed to each of its *present* bands (not missing bands)
+    freq_level: dict[tuple, int] = defaultdict(int)
+    for s in congested:
+        lv = s["congestion_level"]
+        for band in s.get("present_bands", []):
+            if band in _MFA_BANDS:
+                freq_level[(band, lv)] += 1
+
+    if not freq_level:
+        return _csa_empty_fig("✅  No data to display.")
+
+    bands = [b for b in _MFA_BANDS if any(freq_level.get((b, lv), 0) for lv in _CSA_LEVELS)]
+    fig = go.Figure()
+    for lv in _CSA_LEVELS:
+        counts = [freq_level.get((b, lv), 0) for b in bands]
+        if any(counts):
+            fig.add_trace(go.Bar(
+                name=f"{lv} (congested)",
+                x=[f"{b} MHz" for b in bands],
+                y=counts,
+                marker_color=_CSA_LEVEL_COLORS[lv],
+                text=counts,
+                textposition="auto",
+                hovertemplate=(
+                    f"<b>%{{x}}</b><br>"
+                    f"Level {lv}: %{{y}} congested sectors"
+                    "<extra></extra>"
+                ),
+            ))
+
+    fig.update_layout(
+        barmode="stack",
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": _MFA_FONT, "size": 11, "color": "#334155"},
+        xaxis={"gridcolor": "#f1f5f9", "title": "Frequency band"},
+        yaxis={"gridcolor": "#f1f5f9", "title": "Congested sectors"},
+        legend={"orientation": "h", "y": 1.08, "x": 0},
+        margin={"t": 40, "b": 60, "l": 50, "r": 20},
+        height=320,
+    )
+    return fig
+
+
+# ── CSA CALLBACK 2: congested sectors per region ──────────────────────────────
+@callback(
+    Output("csa-region-chart", "figure"),
+    Input("mfa-results-store", "data"),
+)
+def csa_update_region_chart(store):
+    """
+    Stacked bar: x = region, y = number of congested sectors, colour = P0 / P1.
+
+    Uses the same sector grouping and congestion-level overlay as
+    csa_update_freq_chart(); each sector contributes once to its region.
+    """
+    if not store or not store.get("sectors"):
+        return _csa_empty_fig()
+
+    raw_sectors = store["sectors"]
+    sectors = _csa_classify_sectors(raw_sectors)
+
+    congested = [s for s in sectors if s["congestion_level"] in _CSA_LEVELS]
+    if not congested:
+        return _csa_empty_fig("✅  No congested sectors found in the current scan!")
+
+    from collections import defaultdict
+    # (region, level) → sector count — one entry per sector
+    reg_level: dict[tuple, int] = defaultdict(int)
+    for s in congested:
+        reg_level[(s["region"], s["congestion_level"])] += 1
+
+    regions = sorted({r for r, _ in reg_level})
+    fig = go.Figure()
+    for lv in _CSA_LEVELS:
+        counts = [reg_level.get((r, lv), 0) for r in regions]
+        if any(counts):
+            fig.add_trace(go.Bar(
+                name=f"{lv} (congested)",
+                x=regions,
+                y=counts,
+                marker_color=_CSA_LEVEL_COLORS[lv],
+                text=counts,
+                textposition="auto",
+                hovertemplate=(
+                    f"<b>%{{x}}</b><br>"
+                    f"Level {lv}: %{{y}} congested sectors"
+                    "<extra></extra>"
+                ),
+            ))
+
+    fig.update_layout(
+        barmode="stack",
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": _MFA_FONT, "size": 11, "color": "#334155"},
+        xaxis={"gridcolor": "#f1f5f9", "tickangle": -30, "title": "Region"},
+        yaxis={"gridcolor": "#f1f5f9", "title": "Congested sectors"},
+        legend={"orientation": "h", "y": 1.08, "x": 0},
+        margin={"t": 40, "b": 70, "l": 50, "r": 20},
+        height=320,
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── ALL-SECTOR DISTRIBUTION (ASA) ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# These two callbacks show the total count of *all* sectors (regardless of
+# congestion state) broken down by frequency band and by region.
+#
+# The sector topology comes directly from mfa-results-store["sectors"], which
+# is built by _mfa_group_sectors() — identical bucketing to the MFA and CSA
+# charts.  No congestion overlay is needed here; we count every sector.
+#
+# Each sector is attributed to every band it has in present_bands (consistent
+# with how the MFA scanner counts presence), so a dual-band sector (e.g. 800 +
+# 1800 on the same azimuth) increments two bars.  For the region chart each
+# sector is counted exactly once.
+
+_ASA_BAND_COLORS = {
+    "800":  "#6366f1",   # indigo
+    "1800": "#f59e0b",   # amber
+    "2100": "#ef4444",   # red
+    "tdd":  "#10b981",   # emerald  (included if present)
+}
+
+
+def _asa_empty_fig(msg: str = "Click 'Scan Missing Frequencies' to populate") -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(
+        text=msg, x=0.5, y=0.5,
+        xref="paper", yref="paper",
+        showarrow=False,
+        font={"size": 13, "color": TEXT_MUTED},
+    )
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis={"visible": False}, yaxis={"visible": False},
+        margin={"t": 10, "b": 10, "l": 10, "r": 10},
+        height=300,
+    )
+    return fig
+
+
+# ── ASA CALLBACK 1: all sectors per frequency band ────────────────────────────
+@callback(
+    Output("asa-freq-chart", "figure"),
+    Input("mfa-results-store", "data"),
+)
+def asa_update_freq_chart(store):
+    """
+    Bar chart: x = frequency band, y = total sector count (all congestion
+    levels).  Each sector contributes once per band in its present_bands list.
+    """
+    if not store or not store.get("sectors"):
+        return _asa_empty_fig()
+
+    sectors = store["sectors"]
+    if not sectors:
+        return _asa_empty_fig("No sectors found in the current scan.")
+
+    from collections import defaultdict
+    band_count: dict[str, int] = defaultdict(int)
+    for s in sectors:
+        for band in s.get("present_bands", []):
+            band_count[band] += 1
+
+    if not band_count:
+        return _asa_empty_fig("No band data available.")
+
+    # Sort by the canonical band order
+    ordered_bands = [b for b in _MFA_BANDS if b in band_count]
+    # Append any unexpected bands (e.g. tdd if it leaks through) at the end
+    for b in sorted(band_count):
+        if b not in ordered_bands:
+            ordered_bands.append(b)
+
+    labels = [f"{b} MHz" for b in ordered_bands]
+    counts = [band_count[b] for b in ordered_bands]
+    colors = [_ASA_BAND_COLORS.get(b, "#94a3b8") for b in ordered_bands]
+
+    fig = go.Figure(go.Bar(
+        x=labels,
+        y=counts,
+        marker_color=colors,
+        text=counts,
+        textposition="auto",
+        hovertemplate="<b>%{x}</b><br>%{y} sectors<extra></extra>",
+    ))
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": _MFA_FONT, "size": 11, "color": "#334155"},
+        xaxis={"gridcolor": "#f1f5f9", "title": "Frequency band"},
+        yaxis={"gridcolor": "#f1f5f9", "title": "Total sectors"},
+        margin={"t": 30, "b": 60, "l": 50, "r": 20},
+        height=320,
+        showlegend=False,
+    )
+    return fig
+
+
+# ── ASA CALLBACK 2: all sectors per region ────────────────────────────────────
+@callback(
+    Output("asa-region-chart", "figure"),
+    Input("mfa-results-store", "data"),
+)
+def asa_update_region_chart(store):
+    """
+    Bar chart: x = region, y = total sector count (all congestion levels).
+    Each sector is counted exactly once for its region.
+    """
+    if not store or not store.get("sectors"):
+        return _asa_empty_fig()
+
+    sectors = store["sectors"]
+    if not sectors:
+        return _asa_empty_fig("No sectors found in the current scan.")
+
+    from collections import defaultdict
+    region_count: dict[str, int] = defaultdict(int)
+    for s in sectors:
+        region_count[s["region"]] += 1
+
+    regions = sorted(region_count)
+    counts  = [region_count[r] for r in regions]
+
+    fig = go.Figure(go.Bar(
+        x=regions,
+        y=counts,
+        marker_color="#6366f1",
+        text=counts,
+        textposition="auto",
+        hovertemplate="<b>%{x}</b><br>%{y} sectors<extra></extra>",
+    ))
+    fig.update_layout(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": _MFA_FONT, "size": 11, "color": "#334155"},
+        xaxis={"gridcolor": "#f1f5f9", "tickangle": -30, "title": "Region"},
+        yaxis={"gridcolor": "#f1f5f9", "title": "Total sectors"},
+        margin={"t": 30, "b": 70, "l": 50, "r": 20},
+        height=320,
+        showlegend=False,
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── CONGESTED SECTOR DETAIL TABLE (CST) ───────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# One row per congested sector (P0 or P1).  Columns:
+#   Region | Site | Sector Az (°) | Congestion Level | # Cells |
+#   800 MHz | 1800 MHz | 2100 MHz |   ← "✅" present / "❌ missing"
+#   Missing Bands | # Missing | Cells in Sector
+#
+# Sector topology and present/missing bands come from mfa-results-store
+# (built by _mfa_group_sectors).  Congestion level is overlaid by
+# _csa_classify_sectors().  Triggered by the same store so no extra button
+# is needed.
+
+_CST_LEVEL_LABELS = {"P0": "🔴 P0", "P1": "🟠 P1"}
+
+
+# ── CST CALLBACK 1: build the table ──────────────────────────────────────────
+@callback(
+    Output("cst-table-wrap",   "children"),
+    Output("cst-table-count",  "children"),
+    Output("cst-table-store",  "data"),
+    Input("mfa-results-store", "data"),
+)
+def cst_update_table(store):
+    empty_msg = html.Div(
+        "Click 'Scan Missing Frequencies' to populate this table.",
+        style={"display": "flex", "alignItems": "center",
+               "justifyContent": "center", "minHeight": "120px",
+               "color": TEXT_MUTED, "fontSize": "13px", "padding": "20px"},
+    )
+
+    if not store:
+        return empty_msg, "", []
+    if "error" in store:
+        return (html.Div(store["error"],
+                         style={"padding": "16px", "color": "#dc2626",
+                                "fontSize": "13px"}),
+                "", [])
+    if not store.get("sectors"):
+        return empty_msg, "", []
+
+    # Classify every sector with a congestion level
+    all_sectors  = _csa_classify_sectors(store["sectors"])
+    cong_sectors = [s for s in all_sectors
+                    if s["congestion_level"] in _CSA_LEVELS]
+
+    if not cong_sectors:
+        return (html.Div(
+            "✅  No congested sectors found in the current scan.",
+            style={"padding": "20px", "color": "#15803d",
+                   "fontWeight": 600, "fontSize": "13px"},
+        ), "0 congested sectors", [])
+
+    table_data = []
+    for s in sorted(cong_sectors,
+                    key=lambda x: (x["region"], x["site"], x["sector_az"])):
+        present  = set(s.get("present_bands", []))
+        missing  = s.get("missing_bands", [])
+        row = {
+            "Region":           s["region"],
+            "Site":             s["site"],
+            "Sector Az (°)":    int(s["sector_az"]),
+            "Congestion Level": _CST_LEVEL_LABELS.get(
+                                    s["congestion_level"],
+                                    s["congestion_level"]),
+            "# Cells":          s["n_cells"],
+            "800 MHz":          "✅" if "800"  in present else "❌ missing",
+            "1800 MHz":         "✅" if "1800" in present else "❌ missing",
+            "2100 MHz":         "✅" if "2100" in present else "❌ missing",
+            "Missing Bands":    ", ".join(f"{b} MHz" for b in missing) if missing else "—",
+            "# Missing":        len(missing),
+            "Cells in Sector":  ", ".join(s["cell_names"]),
+        }
+        table_data.append(row)
+
+    cols = [{"name": c, "id": c} for c in table_data[0].keys()]
+
+    table = dash_table.DataTable(
+        data=table_data,
+        columns=cols,
+        page_size=20,
+        sort_action="native",
+        filter_action="native",
+        page_action="native",
+        style_table={"overflowX": "auto", "maxHeight": "520px",
+                     "overflowY": "auto"},
+        style_cell={
+            "textAlign": "left", "padding": "9px 12px",
+            "fontSize": "12px",
+            "fontFamily": "'Inter', sans-serif",
+            "border": f"1px solid {BORDER_COLOR}",
+            "minWidth": "80px",
+        },
+        style_header={
+            "fontWeight": 700, "backgroundColor": "#f1f5f9",
+            "borderBottom": f"2px solid {BORDER_COLOR}",
+            "fontSize": "11px", "textTransform": "uppercase",
+            "letterSpacing": "0.3px",
+        },
+        style_data_conditional=[
+            # P0 rows — red tint
+            {"if": {"filter_query": '{Congestion Level} contains "P0"'},
+             "backgroundColor": "#fee2e2", "color": "#7f1d1d"},
+            # P1 rows — orange tint
+            {"if": {"filter_query": '{Congestion Level} contains "P1"'},
+             "backgroundColor": "#fff7ed", "color": "#7c2d12"},
+            # Missing band cells — highlight red text
+            {"if": {"filter_query": '{800 MHz} = "❌ missing"',
+                    "column_id": "800 MHz"},
+             "color": "#dc2626", "fontWeight": 700},
+            {"if": {"filter_query": '{1800 MHz} = "❌ missing"',
+                    "column_id": "1800 MHz"},
+             "color": "#dc2626", "fontWeight": 700},
+            {"if": {"filter_query": '{2100 MHz} = "❌ missing"',
+                    "column_id": "2100 MHz"},
+             "color": "#dc2626", "fontWeight": 700},
+            # Alternating rows (apply after level rows so tints win)
+            {"if": {"row_index": "odd"}, "backgroundColor": "#fafbff"},
+        ],
+        style_cell_conditional=[
+            {"if": {"column_id": "Cells in Sector"},
+             "maxWidth": "260px", "overflow": "hidden",
+             "textOverflow": "ellipsis", "whiteSpace": "nowrap"},
+        ],
+        tooltip_data=[
+            {"Cells in Sector": {"value": row["Cells in Sector"],
+                                  "type": "markdown"}}
+            for row in table_data
+        ],
+        tooltip_delay=0, tooltip_duration=None,
+    )
+
+    n   = len(table_data)
+    n_p0 = sum(1 for r in table_data if "P0" in r["Congestion Level"])
+    n_p1 = sum(1 for r in table_data if "P1" in r["Congestion Level"])
+    count_label = (
+        f"{n} congested sector{'s' if n != 1 else ''}  ·  "
+        f"🔴 {n_p0} P0  🟠 {n_p1} P1"
+    )
+    return table, count_label, table_data
+
+
+# ── CST CALLBACK 2: CSV export ────────────────────────────────────────────────
+@callback(
+    Output("cst-download",    "data"),
+    Input("cst-export-btn",   "n_clicks"),
+    State("cst-table-store",  "data"),
+    prevent_initial_call=True,
+)
+def cst_export_csv(n_clicks, table_data):
+    if not table_data:
+        raise PreventUpdate
+    return dcc.send_data_frame(
+        pd.DataFrame(table_data).to_csv,
+        "congested_sectors.csv",
+        index=False,
+    )
